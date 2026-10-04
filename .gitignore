@@ -35,4 +35,5 @@ google-services.json
 *.hprof
 stock/
 log/
+tools/
 .agent-teams/
