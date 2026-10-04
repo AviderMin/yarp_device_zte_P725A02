@@ -4,13 +4,25 @@
 # /system/etc/ueventd.rc and /vendor/etc/ueventd.rc, so this file has to live at
 # system/etc/ueventd.rc in the recovery ramdisk.
 #
-# Only entries that are actually justified are listed.  The stock recovery
-# ramdisk contains no ueventd.rc at all and the generic /system/etc/ueventd.rc
-# already covers /dev/null, /dev/block/*, /dev/qseecom, ... so the additions
-# below are limited to what recovery needs and what the device really has:
-#   - /dev/ion is used by the display path on msm-4.19
-#   - /dev/qseecom is only useful once the crypto stack is enabled
-#   - the UFS block devices must be readable by the recovery group
+# CORRECTION (verified against the stock recovery image, not assumed): the
+# vendor recovery ramdisk at ~/workdir/twrpgen/recovery.img DOES ship its own
+# /system/etc/ueventd.rc (2824 bytes, extracted and read) together with
+# /system/bin/ueventd, and the stock vendor partition likewise ships
+# /vendor/ueventd.rc.  So this file is NOT new and does not replace anything:
+# ueventd parses the recovery ramdisk's /system/etc/ueventd.rc first and then
+# the stock vendor's /vendor/ueventd.rc, and this file only ADDS deltas.
+#
+# What the vendor copies already cover (therefore NOT repeated here):
+#   /dev/null /dev/zero /dev/full /dev/ptmx /dev/tty /dev/random /dev/urandom
+#   /dev/hw_random /dev/ashmem* /dev/binder /dev/hwbinder /dev/vndbinder
+#   /dev/dri/* /dev/graphics/* /dev/input/* /dev/snd/* /dev/bus/usb/*
+#   subsystem graphics|drm|input|sound, firmware_directories, socket rcvbuf
+# Deliberate additions, each with a reason:
+#   - /dev/ion    : display/ION path on msm-4.19 (not covered by the vendor list)
+#   - /dev/qseecom: only useful once the crypto stack is enabled; harmless now
+#   - backlight   : the stock recovery writes this sysfs node at "on init" as
+#                   root; pinned explicitly so the behaviour stays deterministic
+#   - UFS block   : bootdevice 1d84000.ufshc by-name links (vendor list has none)
 
 /dev/ion                  0664   system     system
 /dev/qseecom              0660   system     drmrpc

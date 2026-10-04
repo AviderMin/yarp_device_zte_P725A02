@@ -64,8 +64,8 @@ on fs
 # ---------------------------------------------------------------------------
 # Qualcomm secure services needed for FBE / metadata decryption are NOT started.
 #
-# The stock device runs a whole keymaster/qseecom stack that recovery never
-# imports:
+# The stock device implements keymaster/gatekeeper as HIDL services that live in
+# the vendor partition and are started by vendor init scripts, e.g.
 #   stock/vendor/bin/qseecomd
 #   stock/vendor/etc/init/android.hardware.keymaster@4.0-service-qti.rc
 #   stock/vendor/etc/init/android.hardware.gatekeeper@1.0-service-qti.rc
@@ -73,13 +73,23 @@ on fs
 #                       libqtikeymaster4,libStDrvInt,libGPreqcancel,libGPreqcancel_svc,
 #                       librpmb,libssd,libsoc_helper,libdrm,libdrmfs,libdrmtime,
 #                       libsecureui,libsecureui_svcsock}.so
-# plus the keymaster TA image from the keymaster partition.
+# plus the keymaster TA image, which is NOT in vendor: it is the signed content
+# of the dedicated keymaster partition (stock/rawprogram4.xml:12 keymaster_a).
 #
-# None of those blobs are present in this repository, and TWRP's crypto support
-# is therefore left OFF (BoardConfig.mk TW_INCLUDE_CRYPTO := false, see
-# device.mk).  Do not claim working decryption until the blobs are extracted
-# AND the result has been verified on the device.  When they are available, the
-# services to declare here are the same ones the reference taro tree uses:
+# The recovery ramdisk at ~/workdir/twrpgen/recovery.img does not contain any of
+# those libraries or services (verified by extracting its 433 cpio entries), and
+# they are not in this repository either.  TWRP's crypto support is therefore
+# left OFF (BoardConfig.mk TW_INCLUDE_CRYPTO := false, see device.mk).
+# Do not claim working decryption until the blobs are extracted AND the result
+# has been verified on the device.  When they are available, the services to
+# declare here should mirror the STOCK definitions exactly (read from
+# stock/vendor/etc/init/), only adding the seclabel and library path that
+# recovery needs.  The stock binaries are:
+#   /vendor/bin/qseecomd                                    (stock qseecomd.rc)
+#   /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
+#   /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+# NOTE: there is no /vendor/bin/keymasterd on this device - that name belongs to
+# other Qualcomm trees and must not be copied in.
 #
 # service vendor.qseecomd /vendor/bin/qseecomd
 #     class core
@@ -88,10 +98,20 @@ on fs
 #     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
 #     seclabel u:r:recovery:s0
 #
-# service vendor.keymasterd /vendor/bin/keymasterd
-#     class core
+# service keymaster-4-0 /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
+#     class hal
 #     user system
 #     group system drmrpc
+#     interface android.hardware.keymaster@4.0::IKeymasterDevice default
+#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
+#     disabled
+#     seclabel u:r:recovery:s0
+#
+# service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+#     class hal
+#     user system
+#     group system
+#     interface android.hardware.gatekeeper@1.0::IGatekeeper default
 #     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
 #     disabled
 #     seclabel u:r:recovery:s0

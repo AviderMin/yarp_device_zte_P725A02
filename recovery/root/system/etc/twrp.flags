@@ -1,41 +1,53 @@
-# TWRP extra partitions for ZTE P725A02.
+# TWRP 额外分区表，用于中兴 P725A02。
 #
-# TWRP reads this as /etc/twrp.flags (bootable/recovery/partitionmanager.cpp,
-# parse_twrp_flags) and matches entries by mount point against recovery.fstab.
-# Format:  <mount point> <fstype> <device> [device2] flags=...
+# TWRP 以 /etc/twrp.flags 读取本文件（bootable/recovery/partitionmanager.cpp 的
+# parse_twrp_flags），并按挂载点与 recovery.fstab 中的条目对应。
+# 每行格式： <挂载点> <文件系统> <设备> [设备2] flags=...
 #
-# Partition names and image sizes come from the stock 9008 package partition
-# table (stock/rawprogram4.xml):
+# 分区名与镜像尺寸来自原厂 9008 救砖包分区表（stock/rawprogram4.xml）：
 #   boot_a/boot_b         24576 x 4096 = 100663296
 #   recovery_a/recovery_b 24576 x 4096 = 100663296
 #   dtbo_a/dtbo_b          6144 x 4096 =  25165824
+#   apdp                        64 x 4096 =    262144（:51）
+#   logdump                  16384 x 4096 =  67108864（:58，已写在 recovery.fstab）
 #
-# image=/flashimg= make TWRP back the partition up and flash it as a raw image.
-# `primary` is deliberately NOT set: primary hard-codes the slot-agnostic node
-# and on this A/B device the real nodes are <name>_a / <name>_b.
+# image=/flashimg= 让 TWRP 以裸镜像方式备份与刷写该分区。
+# 刻意不写 `primary`：primary 会固定使用无槽位的设备节点，而本机是 A/B，
+# 真实节点是 <name>_a / <name>_b。
+#
+# 证据分级（重要）：
+#   [已证实] 名称出现在 stock/rawprogram4.xml，且/或出现在原厂 recovery
+#            镜像自带的 system/etc/recovery.fstab 条目中。
+#   [待确认] 只在原厂 recovery.fstab 中出现（未在本仓库的 XML 分区表中出现）；
+#            在真机上若节点不存在，TWRP 只会忽略该条目，但请勿在未确认前用它刷写。
 
-# mount point        fstype  device                             device2  flags
+# 挂载点             文件系统  设备                              设备2   flags
+# ---------------------------------------------------------------- [已证实]
 /boot                emmc    /dev/block/by-name/boot                     flags=slotselect;display="Boot";backup=1;flashimg=1;image=/boot
 /recovery            emmc    /dev/block/by-name/recovery                 flags=slotselect;display="Recovery";backup=1;flashimg=1;image=/recovery
 /dtbo                emmc    /dev/block/by-name/dtbo                     flags=slotselect;display="DTBO";backup=1;flashimg=1;image=/dtbo
 /vbmeta              emmc    /dev/block/by-name/vbmeta                   flags=slotselect;display="VBMeta";backup=1;flashimg=1;image=/vbmeta
 /vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta System";backup=1;flashimg=1;image=/vbmeta_system
+/apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1;image=/apdp
 
-# Modem firmware family (slot selected; dsp/bluetooth belong to modem)
+# ---------------------------------------------------------------- [已证实]
+# 调制解调器固件族（槽位选择；dsp/bluetooth 属于 modem）
 /modem               emmc    /dev/block/by-name/modem                    flags=slotselect;display="Modem";backup=1;flashimg=1;image=/modem
 /dsp                 emmc    /dev/block/by-name/dsp                      flags=slotselect;backup=1;subpartitionof=/modem
 /bluetooth           emmc    /dev/block/by-name/bluetooth                flags=slotselect;backup=1;subpartitionof=/modem
 
-# Factory/diagnostic partitions that the stock fstab does not mount.
-# NOTE: only apdp is confirmed by stock/rawprogram4.xml:51; the modemst1/modemst2/
-# fsg/fsc names are the standard Qualcomm set but were NOT found in this
-# package, so verify them on the device before relying on them.
-/apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1;image=/apdp
+# ---------------------------------------------------------------- [待确认]
+# 以下名称来自原厂 recovery 镜像自带的 fstab（/persistent→frp、/msadp、/ztecfg、
+# 以及高通惯用的 modemst1/modemst2/fsg/fsc），本仓库的 XML 分区表中没有出现，
+# 因此未经真机确认前不要用它们刷写；节点不存在时 TWRP 会直接忽略。
+/persistent          emmc    /dev/block/by-name/frp                      flags=display="Persistent (frp)";backup=1;flashimg=1;image=/persistent
+/msadp               emmc    /dev/block/by-name/msadp                     flags=display="MSADP";backup=1;flashimg=1;image=/msadp
+/ztecfg              emmc    /dev/block/by-name/ztecfg                    flags=display="ZTECFG";backup=1;flashimg=1;image=/ztecfg
 /fsg                 emmc    /dev/block/by-name/fsg                      flags=display="FSG";backup=1;flashimg=1;image=/fsg
 /fsc                 emmc    /dev/block/by-name/fsc                      flags=display="FSC";backup=1;flashimg=1;image=/fsc
 /modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem ST1";backup=1;flashimg=1;image=/modemst1
 /modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem ST2";backup=1;flashimg=1;image=/modemst2
 
-# Removable storage
+# 可移动存储（原厂 recovery.fstab 用 voldmanaged 设备通配符；TWRP 侧用 auto 更稳）
 /usb_otg             vfat    auto                                       flags=display="USB-OTG";storage;wipeingui;removable
 /sdcard1             vfat    auto                                       flags=display="MicroSD";storage;wipeingui;removable
