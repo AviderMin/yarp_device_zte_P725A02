@@ -1,0 +1,41 @@
+# TWRP extra partitions for ZTE P725A02.
+#
+# TWRP reads this as /etc/twrp.flags (bootable/recovery/partitionmanager.cpp,
+# parse_twrp_flags) and matches entries by mount point against recovery.fstab.
+# Format:  <mount point> <fstype> <device> [device2] flags=...
+#
+# Partition names and image sizes come from the stock 9008 package partition
+# table (stock/rawprogram4.xml):
+#   boot_a/boot_b         24576 x 4096 = 100663296
+#   recovery_a/recovery_b 24576 x 4096 = 100663296
+#   dtbo_a/dtbo_b          6144 x 4096 =  25165824
+#
+# image=/flashimg= make TWRP back the partition up and flash it as a raw image.
+# `primary` is deliberately NOT set: primary hard-codes the slot-agnostic node
+# and on this A/B device the real nodes are <name>_a / <name>_b.
+
+# mount point        fstype  device                             device2  flags
+/boot                emmc    /dev/block/by-name/boot                     flags=slotselect;display="Boot";backup=1;flashimg=1;image=/boot
+/recovery            emmc    /dev/block/by-name/recovery                 flags=slotselect;display="Recovery";backup=1;flashimg=1;image=/recovery
+/dtbo                emmc    /dev/block/by-name/dtbo                     flags=slotselect;display="DTBO";backup=1;flashimg=1;image=/dtbo
+/vbmeta              emmc    /dev/block/by-name/vbmeta                   flags=slotselect;display="VBMeta";backup=1;flashimg=1;image=/vbmeta
+/vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta System";backup=1;flashimg=1;image=/vbmeta_system
+
+# Modem firmware family (slot selected; dsp/bluetooth belong to modem)
+/modem               emmc    /dev/block/by-name/modem                    flags=slotselect;display="Modem";backup=1;flashimg=1;image=/modem
+/dsp                 emmc    /dev/block/by-name/dsp                      flags=slotselect;backup=1;subpartitionof=/modem
+/bluetooth           emmc    /dev/block/by-name/bluetooth                flags=slotselect;backup=1;subpartitionof=/modem
+
+# Factory/diagnostic partitions that the stock fstab does not mount.
+# NOTE: only apdp is confirmed by stock/rawprogram4.xml:51; the modemst1/modemst2/
+# fsg/fsc names are the standard Qualcomm set but were NOT found in this
+# package, so verify them on the device before relying on them.
+/apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1;image=/apdp
+/fsg                 emmc    /dev/block/by-name/fsg                      flags=display="FSG";backup=1;flashimg=1;image=/fsg
+/fsc                 emmc    /dev/block/by-name/fsc                      flags=display="FSC";backup=1;flashimg=1;image=/fsc
+/modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem ST1";backup=1;flashimg=1;image=/modemst1
+/modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem ST2";backup=1;flashimg=1;image=/modemst2
+
+# Removable storage
+/usb_otg             vfat    auto                                       flags=display="USB-OTG";storage;wipeingui;removable
+/sdcard1             vfat    auto                                       flags=display="MicroSD";storage;wipeingui;removable

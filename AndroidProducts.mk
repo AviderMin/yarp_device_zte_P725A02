@@ -6,9 +6,7 @@
 #
 
 PRODUCT_MAKEFILES := \
-    $(LOCAL_DIR)/omni_P725A02.mk
+    $(LOCAL_DIR)/twrp_P725A02.mk
 
 COMMON_LUNCH_CHOICES := \
-    omni_P725A02-user \
-    omni_P725A02-userdebug \
-    omni_P725A02-eng
+    twrp_P725A02-eng

@@ -1,0 +1,26 @@
+# ueventd permissions for ZTE P725A02 recovery.
+#
+# Loaded first in recovery mode: system/core/init/ueventd.cpp:301/315 parses
+# /system/etc/ueventd.rc and /vendor/etc/ueventd.rc, so this file has to live at
+# system/etc/ueventd.rc in the recovery ramdisk.
+#
+# Only entries that are actually justified are listed.  The stock recovery
+# ramdisk contains no ueventd.rc at all and the generic /system/etc/ueventd.rc
+# already covers /dev/null, /dev/block/*, /dev/qseecom, ... so the additions
+# below are limited to what recovery needs and what the device really has:
+#   - /dev/ion is used by the display path on msm-4.19
+#   - /dev/qseecom is only useful once the crypto stack is enabled
+#   - the UFS block devices must be readable by the recovery group
+
+/dev/ion                  0664   system     system
+/dev/qseecom              0660   system     drmrpc
+
+# Panel backlight: the stock recovery ramdisk writes
+# /sys/class/backlight/panel0-backlight/brightness at "on init", i.e. before
+# ueventd has finished applying the vendor's sysfs permissions.  Granting the
+# write explicitly here keeps that behaviour deterministic.
+/sys/class/backlight/panel0-backlight/brightness     0664   system     system
+
+# UFS (bootdevice 1d84000.ufshc) and its by-name links
+/dev/block/sd*            0660   root       system
+/dev/block/platform/soc/1d84000.ufshc/by-name/*   0660   root   system

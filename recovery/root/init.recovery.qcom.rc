@@ -24,15 +24,74 @@
 # OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
+# Recovery init for ZTE P725A02 (lito, msm-4.19).
+#
+# This file is the ONE piece kept from the generator template: it already
+# matched the stock recovery ramdisk's own init.recovery.qcom.rc byte for byte
+# (same backlight write, same USB controller property, same bootdevice symlink).
+# Everything else in recovery/root was restructured to the paths TWRP 16
+# actually reads:
+#   system/etc/recovery.fstab   (TARGET_RECOVERY_FSTAB, copied by core/Makefile)
+#   system/etc/twrp.flags       (read as /etc/twrp.flags)
+#   system/etc/ueventd.rc       (first path ueventd parses in recovery mode)
+
+# NOTE on paths: TWRP's own bootable/recovery/etc/init.rc already does
+#   import /init.recovery.${ro.hardware}.rc   (-> this file, ro.hardware=qcom)
+#   symlink /system/etc /etc                  (so /etc/twrp.fstab,
+#                                              /etc/recovery.fstab and
+#                                              /etc/twrp.flags resolve)
+#   import /init.recovery.usb.rc              (generic USB gadget setup)
+# so this device tree neither repeats the symlink nor ships its own USB rc.
 
 on init
+    # The stock recovery ramdisk does exactly this (200).
     write /sys/class/backlight/panel0-backlight/brightness 200
     setprop sys.usb.configfs 1
 
 on property:ro.boot.usbcontroller=*
     setprop sys.usb.controller ${ro.boot.usbcontroller}
-#    write /sys/class/udc/${ro.boot.usbcontroller}/device/../mode peripheral
+    # The stock recovery keeps this commented out because the controller string
+    # already ends in ".dwc3" and sys.usb.controller is consumed verbatim:
+    #   ro.boot.usbcontroller=a600000.dwc3   (stock boot.img-cmdline)
+    # so /sys/class/udc/${ro.boot.usbcontroller} resolves without an extra
+    # ".dwc3" suffix.  Left disabled on purpose.
+    # write /sys/class/udc/${ro.boot.usbcontroller}/device/../mode peripheral
 
 on fs
     wait /dev/block/platform/soc/${ro.boot.bootdevice}
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
+
+# ---------------------------------------------------------------------------
+# Qualcomm secure services needed for FBE / metadata decryption are NOT started.
+#
+# The stock device runs a whole keymaster/qseecom stack that recovery never
+# imports:
+#   stock/vendor/bin/qseecomd
+#   stock/vendor/etc/init/android.hardware.keymaster@4.0-service-qti.rc
+#   stock/vendor/etc/init/android.hardware.gatekeeper@1.0-service-qti.rc
+#   stock/vendor/lib64/{libQSEEComAPI,libkeymasterdeviceutils,libkeymasterutils,
+#                       libqtikeymaster4,libStDrvInt,libGPreqcancel,libGPreqcancel_svc,
+#                       librpmb,libssd,libsoc_helper,libdrm,libdrmfs,libdrmtime,
+#                       libsecureui,libsecureui_svcsock}.so
+# plus the keymaster TA image from the keymaster partition.
+#
+# None of those blobs are present in this repository, and TWRP's crypto support
+# is therefore left OFF (BoardConfig.mk TW_INCLUDE_CRYPTO := false, see
+# device.mk).  Do not claim working decryption until the blobs are extracted
+# AND the result has been verified on the device.  When they are available, the
+# services to declare here are the same ones the reference taro tree uses:
+#
+# service vendor.qseecomd /vendor/bin/qseecomd
+#     class core
+#     user root
+#     group root drmrpc
+#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
+#     seclabel u:r:recovery:s0
+#
+# service vendor.keymasterd /vendor/bin/keymasterd
+#     class core
+#     user system
+#     group system drmrpc
+#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
+#     disabled
+#     seclabel u:r:recovery:s0
