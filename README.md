@@ -41,7 +41,7 @@
 | manifest 版本 | `ffeeac4395eac483df102495ea6f908c95fd3891` |
 | AOSP 基线 | `android-16.0.0_r1` |
 | TWRP 版本串 | `3.7.1_16`（`bootable/recovery/variables.h:20` 的 `TW_MAIN_VERSION_STR`） |
-| 本设备树验证基线 | 提交 `ca5668068d3da1aeb31b708195224dfd283c2c3e` |
+| 本设备树验证基线 | 提交 `dce3d21d3f183ae08ac821c94fbfff679731ed5c`（下表 `recovery.img` 哈希即对应此版本；构建时间 2026-10-04T23:54+08:00）。任何后续改动都必须重新构建并再次独立复验 |
 | 可用 release 配置 | `bp2a`（另有 ap2a / ap3a / ap4a / bp1a），位于 `build/release/release_configs/` |
 
 编译验证与复验均在真实检出 `~/workdir/TWRP-Test` 上完成，**未对上游 TWRP 源码做任何修改**。
@@ -161,11 +161,11 @@ recovery fstab 中；`[待确认]` 表示仅见于原厂 recovery fstab（未出
 | 编译 | `lunch` 与 `mka recoveryimage` | 通过（`lunch twrp_P725A02 bp2a eng` 返回 0；`mka recoveryimage` 返回 0，约 2.5 分钟） |
 | 编译 | 是否为独立 recoveryimage 而非 recovery-as-boot | 通过（只产出 `recovery.img` 与 `dtb.img`，无 `boot.img`／`vendor_boot.img`／`dtbo.img`） |
 | 镜像 | `recovery.img` 尺寸 | 100663296 字节（恰好 96 MiB，余量为 0） |
-| 镜像 | `recovery.img` sha256 | `84c6ef39bc43c3a7253baf2d55dcbb229e290926b6c91210379ae98a5f0dbdd3` |
+| 镜像 | `recovery.img` sha256 | `539ca3630b04ea2187685d4b1e5df8c6f52d1bca6732667e619a112bfbeba15b`（独立复验构建，2026-10-04T23:54+08:00） |
 | 镜像 | 镜像头字段 | 通过（`ANDROID!` / v2；pagesize 4096；kernel_addr 0x00008000；ramdisk_addr 0x01000000；tags_addr 0x00000100；dtb_addr 0x01f00000；second_size 0） |
 | 镜像 | 内核与原厂逐字节相同 | 通过（镜像内 kernel sha256 `697dd05f…aca3cb`；产物 `out/.../kernel` 亦为同一哈希） |
 | 镜像 | DTB 段 | 通过（产物 `dtb.img` sha256 `df33dddc…0f1e34`，与原厂 `boot.img-dtb` 相同，2027715 字节） |
-| 镜像 | recovery ramdisk 内容 | 通过（gzip，压缩 27459347 字节 / 解压 66194944 字节） |
+| 镜像 | recovery ramdisk 内容 | 通过（gzip，压缩 27461540 字节 / 解压 66198272 字节，含 `system/bin/recovery`） |
 | 镜像 | ramdisk 内 4 个设备文件与工作区源文件是否一致 | 通过（`recovery.fstab`、`twrp.flags`、`ueventd.rc`、`init.recovery.qcom.rc` 哈希逐项相同） |
 | 镜像 | `/etc` 解析 | 通过（TWRP 自带 `init.rc` 执行 `symlink /system/etc /etc`；`twrp.cpp:441-446` 先找 `/etc/twrp.fstab`，否则用 `/etc/recovery.fstab`） |
 | 实机 | 真实分区尺寸 | **未做** |
@@ -174,9 +174,18 @@ recovery fstab 中；`[待确认]` 表示仅见于原厂 recovery fstab（未出
 | 实机 | FBE 解密 | **未做且当前不支持** |
 | 实机 | 引导（`fastboot boot`） | **未做** |
 
-说明两点：其一，`recovery.img` 是编译验证时产出的中间产物，其 sha256 对应验证时的
-设备树版本；任何设备树改动都会改变该哈希，需要重新构建并发起独立复验。
-其二，上表中“镜像”类结论来自镜像结构核对；编译产物的最终字节级复算以独立验证结果为准。
+关于上面这组数值的三点说明：
+
+1. 表中 `recovery.img` 的尺寸与 sha256 对应的是**上表所列验证基线（提交 `dce3d21d…`）**，
+   即 t5 整合后的设备树版本；任何后续改动（包括仅修改 ramdisk 内的配置文件）都会改变该哈希，
+   必须重新构建并发起独立复验。
+2. 该镜像另经独立复验：AVBf 页脚存在（`orig_image_size` = 76099584，0x04893000），
+   内部 AVB0 vbmeta 为 1664 字节；ramdisk 内 4 个设备文件的哈希与工作区源文件逐项一致
+   （`recovery.fstab` `bb4d6872…`、`twrp.flags` `00190f77…`、`ueventd.rc` `86c2edee…`、
+   `init.recovery.qcom.rc` `a3656f7a…`）。
+3. 早前一次构建（t4 阶段，设备树为 t5 整合前的版本）产出的哈希为
+   `84c6ef39bc43c3a7253baf2d55dcbb229e290926b6c91210379ae98a5f0dbdd3`，
+   **已被 t5 整合取代，不是最终产物**，仅在此备案以免混淆。
 
 ## 构建步骤
 
