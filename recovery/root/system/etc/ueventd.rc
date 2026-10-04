@@ -1,38 +1,140 @@
-# ueventd permissions for ZTE P725A02 recovery.
+# ueventd 设备节点规则（ZTE P725A02 / lito，TWRP 3.7.1_16 基线）
 #
-# Loaded first in recovery mode: system/core/init/ueventd.cpp:301/315 parses
-# /system/etc/ueventd.rc and /vendor/etc/ueventd.rc, so this file has to live at
-# system/etc/ueventd.rc in the recovery ramdisk.
+# ── 这个文件在 recovery 里由谁解析 ─────────────────────────────────────────
+# system/core/init/ueventd.cpp:299-334（TWRP 16 的 system/core 基线）在
+# ro.product.first_api_level < 33 时按以下顺序解析：
+#   /system/etc/ueventd.rc  →  /vendor/ueventd.rc  →  /odm/ueventd.rc  →
+#   /ueventd.${ro.hardware}.rc
+# 本设备 PRODUCT_SHIPPING_API_LEVEL := 30（device.mk），所以会解析旧路径；
+# 真机日志也证实了这一点（log/dmesg.txt 1.236 s：先 Parsing file
+# /system/etc/ueventd.rc...，再 Parsing file /vendor/ueventd.rc...）。
 #
-# CORRECTION (verified against the stock recovery image, not assumed): the
-# vendor recovery ramdisk at ~/workdir/twrpgen/recovery.img DOES ship its own
-# /system/etc/ueventd.rc (2824 bytes, extracted and read) together with
-# /system/bin/ueventd, and the stock vendor partition likewise ships
-# /vendor/ueventd.rc.  So this file is NOT new and does not replace anything:
-# ueventd parses the recovery ramdisk's /system/etc/ueventd.rc first and then
-# the stock vendor's /vendor/ueventd.rc, and this file only ADDS deltas.
+# 注意：本构建的 recovery ramdisk 里没有 /vendor/ueventd.rc、也没有
+# /odm/ueventd.rc（解包 out/target/product/P725A02/ramdisk-recovery.img 的 776 个
+# cpio 条目核对过），并且原厂 vendor 分区那份 stock/vendor/ueventd.rc（481 行）
+# 里 0 处 subsystem 段。因此“其它文件会补上 subsystem 声明”是不成立的：
+# 下面四个 subsystem 段必须由本文件提供。
 #
-# What the vendor copies already cover (therefore NOT repeated here):
-#   /dev/null /dev/zero /dev/full /dev/ptmx /dev/tty /dev/random /dev/urandom
-#   /dev/hw_random /dev/ashmem* /dev/binder /dev/hwbinder /dev/vndbinder
-#   /dev/dri/* /dev/graphics/* /dev/input/* /dev/snd/* /dev/bus/usb/*
-#   subsystem graphics|drm|input|sound, firmware_directories, socket rcvbuf
-# Deliberate additions, each with a reason:
-#   - /dev/ion    : display/ION path on msm-4.19 (not covered by the vendor list)
-#   - /dev/qseecom: only useful once the crypto stack is enabled; harmless now
-#   - backlight   : the stock recovery writes this sysfs node at "on init" as
-#                   root; pinned explicitly so the behaviour stays deterministic
-#   - UFS block   : bootdevice 1d84000.ufshc by-name links (vendor list has none)
+# ── 为什么 subsystem 段是必需的（不是可选优化）────────────────────────────
+# 节点落在哪里由 system/core/init/devices.cpp:758-795 与 devices.h:96-110 决定：
+#   block                  → /dev/block/<basename(devpath)>          （显式分支）
+#   已声明的 subsystem     → <dirname>/<basename(devpath)>           （drm → /dev/dri/card0）
+#   usb                    → 显式分支
+#   其它/未声明 subsystem  → /dev/<basename(devpath)>                （drm → /dev/card0）
+# 缺少 subsystem drm 时，DRM 节点会被建成 /dev/card0；而 TWRP 的显示后端只打开
+# /dev/dri/cardN（twrpminui/graphics_drm.cpp:1224-1230，且只尝试一次），于是真机
+# 出现（log/recovery.txt:15-35）：
+#   cannot find/open a drm device: No such file or directory
+#   cannot open fb0 (retrying) ×20 → (giving up)
+# 同一原因，input 节点会落到 /dev/event*，而 TWRP 只扫 /dev/input
+# （twrpminui/events.cpp:222/232），触摸与按键同样会失效。graphics/sound 同理。
+# 本机内核没有任何 fbdev 驱动（prebuilt/kernel 里 msm_fb/mdss_fb/msmdrmfb/fbcon/
+# drm_fb_helper 全部 0 命中，dmesg 里也没有 fb0/fbcon 记录），所以 /dev/graphics/fb0
+# 永远不会出现：DRM 是唯一可用的显示路径。
+#
+# ── 规则来源（不做任何发明）────────────────────────────────────────────────
+# 下面 “原厂恢复镜像 ueventd.rc” 一节逐字取自原厂 recovery 镜像 ramdisk 的
+#   system/etc/ueventd.rc
+# 本地落盘副本：stock/recovery/ramdisk/system/etc/ueventd.rc，2824 字节，
+#   sha256 828f6b7d08d38d3b09c2203b1624f6ea68bd8eb4c15607cf38f24dfff727c5da
+#   （与 ~/workdir/twrpgen/recovery.img 解包出的同名文件逐字节相同）
+# 该文件在原厂机器上工作正常，因此这里直接沿用其全部规则，不再自创等价物。
+# 本设备树只在其后追加 “本树增量” 一节，每条增量都写明理由。
+#
+# ── 格式（system/core/init/ueventd_parser.cpp:36-43）──────────────────────
+#   /dev 行：devname mode uid gid         （4 或 5 段）
+#   /sys  行：nodename attr mode uid gid  （5 或 6 段）
+# /sys 行的 nodename 必须是设备自身的 sysfs 路径（uevent.path），
+# /sys/class/... 这类别名路径不会命中（devices.cpp:368-384），故本文件不写
+# 这种无效规则；背光写入由 root 完成（日志显示 SELinux permissive=1，写入已成功）。
+#
+# ─────────────────────────── 原厂恢复镜像 ueventd.rc（逐字）────────────────
+firmware_directories /etc/firmware/ /odm/firmware/ /vendor/firmware/ /firmware/image/
+uevent_socket_rcvbuf_size 16M
 
+subsystem graphics
+    devname uevent_devpath
+    dirname /dev/graphics
+
+subsystem drm
+    devname uevent_devpath
+    dirname /dev/dri
+
+subsystem input
+    devname uevent_devpath
+    dirname /dev/input
+
+subsystem sound
+    devname uevent_devpath
+    dirname /dev/snd
+
+# ueventd can only set permissions on device nodes and their associated
+# sysfs attributes, not on arbitrary paths.
+#
+# format for /dev rules: devname mode uid gid
+# format for /sys rules: nodename attr mode uid gid
+# shortcut: "mtd@NN" expands to "/dev/mtd/mtdNN"
+
+/dev/null                 0666   root       root
+/dev/zero                 0666   root       root
+/dev/full                 0666   root       root
+/dev/ptmx                 0666   root       root
+/dev/tty                  0666   root       root
+/dev/random               0666   root       root
+/dev/urandom              0666   root       root
+# Make HW RNG readable by group system to let EntropyMixer read it.
+/dev/hw_random            0440   root       system
+/dev/ashmem*              0666   root       root
+/dev/binder               0666   root       root
+/dev/hwbinder             0666   root       root
+/dev/vndbinder            0666   root       root
+
+/dev/stmvl53l1_ranging    0660   camera  system
+
+# Anyone can read the logs, but if they're not in the "logs"
+# group, then they'll only see log entries for their UID.
+/dev/zlog/*               0666   root       log
+/dev/pmsg0                0222   root       log
+
+# kms driver for drm based gpu
+/dev/dri/*                0666   root       graphics
+
+# these should not be world writable
+/dev/uhid                 0660   uhid       uhid
+/dev/uinput               0660   uhid       uhid
+/dev/rtc0                 0640   system     system
+/dev/tty0                 0660   root       system
+/dev/graphics/*           0660   root       graphics
+/dev/input/*              0660   root       input
+/dev/v4l-touch*           0660   root       input
+/dev/snd/*                0660   system     audio
+/dev/bus/usb/*            0660   root       usb
+/dev/mtp_usb              0660   root       mtp
+/dev/usb_accessory        0660   root       usb
+/dev/tun                  0660   system     vpn
+
+# CDMA radio interface MUX
+/dev/ppp                  0660   radio      vpn
+
+# sysfs properties
+/sys/devices/platform/trusty.*      trusty_version        0440  root   log
+/sys/devices/virtual/input/input*   enable      0660  root   input
+/sys/devices/virtual/input/input*   poll_delay  0660  root   input
+/sys/devices/virtual/usb_composite/*   enable      0664  root   system
+/sys/devices/system/cpu/cpu*   cpufreq/scaling_max_freq   0664  system system
+/sys/devices/system/cpu/cpu*   cpufreq/scaling_min_freq   0664  system system
+
+# ─────────────────────────────── 本树增量 ──────────────────────────────────
+# 原厂 recovery ramdisk 的 ueventd.rc 里没有下面几条；它们在本环境仍是必需的
+# 或与原厂保持一致的补充。
+
+# msm-4.19 的 ION 节点；本构建 recovery ramdisk 内没有 /vendor/ueventd.rc，
+# 所以原厂 vendor 那份里的 /dev/ion 规则在本环境不会被解析。
 /dev/ion                  0664   system     system
+
+# 与原厂 vendor 规则一致；crypto 未启用，写上只是让权限与原厂保持一致。
 /dev/qseecom              0660   system     drmrpc
 
-# Panel backlight: the stock recovery ramdisk writes
-# /sys/class/backlight/panel0-backlight/brightness at "on init", i.e. before
-# ueventd has finished applying the vendor's sysfs permissions.  Granting the
-# write explicitly here keeps that behaviour deterministic.
-/sys/class/backlight/panel0-backlight/brightness     0664   system     system
-
-# UFS (bootdevice 1d84000.ufshc) and its by-name links
+# UFS（bootdevice 1d84000.ufshc）及其 by-name 链接。
 /dev/block/sd*            0660   root       system
 /dev/block/platform/soc/1d84000.ufshc/by-name/*   0660   root   system

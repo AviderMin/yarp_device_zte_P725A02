@@ -71,6 +71,7 @@ TARGET_NO_BOOTLOADER := true
 
 # ---------------------------------------------------------------- Display
 TARGET_SCREEN_DENSITY := 480
+TARGET_RECOVERY_DEFAULT_REFRESH_RATE := 90
 
 # ----------------------------------------------------------------- Kernel
 # Every value below is copied from the STOCK images, not guessed:

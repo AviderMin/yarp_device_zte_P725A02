@@ -1,0 +1,122 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 设备树自带的 recovery USB 配置（在 ramdisk 内覆盖 TWRP 上游的 etc/init.recovery.usb.rc）
+#
+# 问题（现场：显示修好后能进 UI，但 ADB 失效）：
+#  1. 本机是 configfs gadget（真机日志 log/dmesg.txt 6.402/6.464 s：init.rc:241/245 写
+#     /config/usb_gadget/g1/UDC 才把 USB 拉起来），legacy /sys/class/android_usb/android0
+#     在内核里不存在。
+#  2. TWRP 上游 etc/init.rc 的整个 configfs 分支只有 adb / sideload / fastboot / none：
+#     对上游文件检索 mtp 命中 0 次，没有 mtp,adb 处理块，也没有 functions/mtp.gs0。
+#  3. 但 TWRP 在 UI 启动成功后会自动启用 MTP：twrp.cpp:372-393（STARTUP 步骤），条件为
+#     tw_mtp_enabled（data.cpp:735-736：TW_HAS_MTP 编进镜像时默认 1；ramdisk 内含
+#     system/lib64/libtwrpmtp-ffs.so，system/bin/recovery 内含 "Starting MTP"）
+#     且 (!TW_IS_ENCRYPTED || TW_IS_DECRYPTED)；Enable_MTP() 先把 sys.usb.config 置 none、
+#     再置 mtp,adb（partitionmanager.cpp:2689-2695）。
+#  4. 后果：init.rc 的 none 块执行 "write UDC none / stop adbd / rm b.1/f1" 之后，mtp,adb
+#     没有任何 configfs 处理块 → UDC 不会被写回 → 主机端看不到任何 USB 设备 = ADB/MTP 全灭。
+#     这正好解释“显示修好后才出现”：旧镜像 UI 起不来时 twrp.cpp:372-393 不会执行，
+#     sys.usb.config 停在 adb，日志里 adbd 起来、USB_STATE=CONNECTED/CONFIGURED 正常。
+#
+# 本文件的处理（ADB 优先，最小且安全）：
+#  * 在 configfs 下把 mtp,adb 当作“adb”拉起：start adbd，并用 ffs.adb 挂到 b.1/f1、写回 UDC。
+#    这样 USB 不会再被拆掉后不拉起，ADB 始终可用（PID 用本机 adb 值 D001、configuration "adb"，
+#    与主机实际看到的功能保持一致）。
+#  * 故意 **不**把 mtp.gs0 链接进 b.1：TWRP 的 MTP 依赖 /dev/usb-ffs/mtp 这个 functionfs 实例，
+#    而本 ramdisk 里没有任何 rc 挂载它（已核对 ramdisk 内全部 *.rc 与上游 init.rc：只挂
+#    /dev/usb-ffs/adb 与 /dev/usb-ffs/fastboot），libtwrpmtp-ffs.so 又只认 /dev/usb-ffs/mtp/ep0..3。
+#    未绑定用户态的 functionfs 函数会让整条 config 的 UDC bind 失败，那会把 ADB 一起拖死，
+#    因此这里只在文件里创建好 mtp.gs0 函数并给出注释模板，等真正补上 functionfs 挂载后再链接。
+#  * 参考实现：device/xiaomi/munch/recovery/root/init.recovery.usb.rc（TWRP 16、同为 configfs
+#    机型）同样由设备树自带该文件；AOSP 侧对应实现见 system/core/rootdir/init.usb.configfs.rc:26-40
+#    （mtp,adb 分支：start adbd + ffs.ready 门控的 configuration/symlink/UDC 写入）。
+#  * 下面的 legacy 分支与上游 bootable/recovery/etc/init.recovery.usb.rc 逐字一致，
+#    保证 configfs=0 时行为不退化。
+#
+# 说明：init 的 builtin 失败只记日志、不中断该 action（system/core/init/action.cpp:159-174），
+# 且 symlink 是先建临时链接再 rename（原子替换），所以与上游 init.rc 之间的重复创建是安全的。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ---- configfs gadget（本机 sys.usb.controller = ${ro.boot.usbcontroller} = a600000.dwc3）----
+on init
+    mkdir /config
+    mount configfs none /config
+    mkdir /config/usb_gadget/g1 0770 shell shell
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    mkdir /config/usb_gadget/g1/strings/0x409 0770
+    write /config/usb_gadget/g1/strings/0x409/serialnumber ${ro.serialno}
+    write /config/usb_gadget/g1/strings/0x409/manufacturer ${ro.product.manufacturer}
+    write /config/usb_gadget/g1/strings/0x409/product ${ro.product.model}
+    mkdir /config/usb_gadget/g1/functions/ffs.adb
+    mkdir /config/usb_gadget/g1/functions/ffs.fastboot
+    # MTP 函数先建好（默认不链接，理由见文件头）；将来补上 /dev/usb-ffs/mtp 挂载后再按模板链接
+    mkdir /config/usb_gadget/g1/functions/mtp.gs0
+    mkdir /config/usb_gadget/g1/configs/b.1 0777 shell shell
+    mkdir /config/usb_gadget/g1/configs/b.1/strings/0x409 0770 shell shell
+    # 900mA，与上游 init.rc 的 MaxPower 写入一致
+    write /config/usb_gadget/g1/configs/b.1/MaxPower 0x384
+    setprop sys.usb.configfs 1
+# ---- legacy android_usb 分支（与上游 bootable/recovery/etc/init.recovery.usb.rc 逐字一致）----
+on fs
+    write /sys/class/android_usb/android0/enable 0
+    write /sys/class/android_usb/android0/idVendor 18D1
+    write /sys/class/android_usb/android0/idProduct D001
+    write /sys/class/android_usb/android0/f_ffs/aliases adb
+    write /sys/class/android_usb/android0/functions adb
+    write /sys/class/android_usb/android0/iManufacturer ${ro.product.manufacturer}
+    write /sys/class/android_usb/android0/iProduct ${ro.product.model}
+    write /sys/class/android_usb/android0/iSerial ${ro.serialno}
+
+on property:sys.usb.config=none
+    write /sys/class/android_usb/android0/enable 0
+    write /sys/class/android_usb/android0/bDeviceClass 0
+
+on property:sys.usb.config=mass_storage,adb
+    write /sys/class/android_usb/android0/enable 0
+    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+    write /sys/class/android_usb/android0/enable 1
+
+on property:sys.usb.config=mtp,adb
+    write /sys/class/android_usb/android0/enable 0
+    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+    write /sys/class/android_usb/android0/enable 1
+    start adbd
+
+on property:sys.usb.config=adb
+    write /sys/class/android_usb/android0/enable 0
+    write /sys/class/android_usb/android0/functions ${sys.usb.config}
+    write /sys/class/android_usb/android0/enable ${service.adb.root}
+    start adbd
+
+# ---- configfs 补充：mtp,adb 分支（上游 init.rc 完全缺失）----
+# TWRP 把 sys.usb.config 切到 mtp,adb 时：先 start adbd（上游只对 adb 有这条触发器），
+# 等 adbd 打开 /dev/usb-ffs/adb 并置 sys.usb.ffs.ready=1 后，把 ffs.adb 挂到 b.1 并写回 UDC。
+on property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+    start adbd
+
+on property:sys.usb.ffs.ready=1 && property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+    write /config/usb_gadget/g1/idVendor 0x18D1
+    write /config/usb_gadget/g1/idProduct 0xD001
+    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "adb"
+    rm /config/usb_gadget/g1/configs/b.1/f1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f1
+    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+    setprop sys.usb.state ${sys.usb.config}
+
+# 离开 mtp,adb 时清掉 f2，避免残留链接（上游 none 块只 rm f1）
+on property:sys.usb.config=none && property:sys.usb.configfs=1
+    rm /config/usb_gadget/g1/configs/b.1/f2
+
+# ---- 模板：等 /dev/usb-ffs/mtp 这个 functionfs 实例被挂载之后，再启用真正的 MTP+ADB ----
+# 前提（缺一不可）：a) 有人 mkdir /dev/usb-ffs/mtp 并 mount functionfs mtp /dev/usb-ffs/mtp；
+# b) TWRP 的 MTP 服务成功绑定并置 sys.usb.ffs.mtp.ready=1（该属性由 libtwrpmtp-ffs.so 设置，
+#    Disable_MTP 会把它清 0，见 partitionmanager.cpp:2737）。两者都满足后再打开下面这块，
+# 并把上面的 adb 分支换成 AOSP init.usb.configfs.rc:35-40 的 mtp_adb 写法。
+#on property:sys.usb.ffs.mtp.ready=1 && property:sys.usb.config=mtp,adb && property:sys.usb.configfs=1
+#    write /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration "mtp_adb"
+#    rm /config/usb_gadget/g1/configs/b.1/f1
+#    rm /config/usb_gadget/g1/configs/b.1/f2
+#    symlink /config/usb_gadget/g1/functions/mtp.gs0 /config/usb_gadget/g1/configs/b.1/f1
+#    symlink /config/usb_gadget/g1/functions/ffs.adb /config/usb_gadget/g1/configs/b.1/f2
+#    write /config/usb_gadget/g1/UDC ${sys.usb.controller}
+#    setprop sys.usb.state ${sys.usb.config}

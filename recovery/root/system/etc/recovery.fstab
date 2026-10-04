@@ -24,9 +24,17 @@ odm                                                     /odm                   e
 # ---- Metadata (FBE key storage, wrapped keys via keymaster)
 /dev/block/bootdevice/by-name/metadata                      /metadata              ext4    noatime,nosuid,nodev,discard             wait,check,formattable,wrappedkey
 
-# ---- Userdata: FBE + ICE + wrappedkey exactly as the stock fstab declares it.
-# sysfs_path is the UFS controller taken from the stock fstab (1d84000.ufshc).
-/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,checkpoint=fs
+# ---- Userdata: FBE + ICE + wrappedkey，逐项与原厂 recovery.fstab 对齐。
+# 与原厂 recovery 镜像自带的 /system/etc/recovery.fstab（同机、已知可用）比对后修正两处偏差：
+#   * 挂载选项不含 inlinecrypt —— 只有原厂 *boot* 的 fstab.qcom 才带它（正常启动时 ICE
+#     密钥已由 keymaster 提供）；recovery 没有 ICE 密钥句柄，不应请求 inline-crypt 语义。
+#   * fs_mgr 标志恢复 sysfs_path=/sys/devices/platform/soc/1d84000.ufshc（UFS 控制器），
+#     原厂 recovery.fstab 正是这么写的（旧注释声称取了该值，但行里没有，属注释与行不符）。
+# 重要限制（不要误判为本次修正能解决）：/data 是 FBE + ICE + wrappedkey，密钥经 keymaster
+# 包在 /metadata/vold/metadata_encryption；本镜像 TW_INCLUDE_CRYPTO := false 且未带
+# qseecom/keymaster 库与服务，因此无法解密，挂载失败属已知限制；任何情况下都不要格式化
+# userdata（唯一能真正修好 /data 的路径是补齐原厂 crypto blobs 并实机验证）。
+/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
 
 # ---- Persistent firmware / properties
 /dev/block/bootdevice/by-name/persist                       /mnt/vendor/persist    ext4    noatime,nosuid,nodev,barrier=1           wait,check,formattable
