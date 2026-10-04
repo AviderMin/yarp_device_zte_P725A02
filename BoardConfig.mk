@@ -141,9 +141,17 @@ BOARD_HAS_LARGE_FILESYSTEM := true
 BOARD_SYSTEMIMAGE_PARTITION_TYPE := ext4
 BOARD_USERDATAIMAGE_FILE_SYSTEM_TYPE := ext4
 BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE := ext4
+# TARGET_COPY_OUT_PRODUCT / TARGET_COPY_OUT_ODM are deliberately NOT set.
+# AOSP defaults are system/product and vendor/odm.  Setting them to the
+# standalone values 'product'/'odm' activates the check_image_config guard in
+# build/make/core/board_config.mk:404-414, which then requires
+# BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE / BOARD_ODMIMAGE_FILE_SYSTEM_TYPE (or
+# prebuilt images) and makes lunch fail with:
+#   "If TARGET_COPY_OUT_PRODUCT is 'product', either BOARD_PREBUILT_PRODUCTIMAGE
+#    or BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE must be set."
+# This device does not build product.img/odm.img, so the standalone dirs are
+# simply not wanted.  BoardConfig.mk:713-716/822-826 confirms the defaults.
 TARGET_COPY_OUT_VENDOR := vendor
-TARGET_COPY_OUT_PRODUCT := product
-TARGET_COPY_OUT_ODM := odm
 # The stock boot ramdisk fstab.qcom mounts /metadata and userdata is FBE/ICE
 # (fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption).
 BOARD_USES_METADATA_PARTITION := true

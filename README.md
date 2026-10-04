@@ -9,11 +9,11 @@ against the stock firmware in `stock/` and the real TWRP sources.
 | Area | State |
 |---|---|
 | fstab / partition layout | repaired from stock evidence |
-| product inheritance / lunch | repaired for TWRP 16 |
+| product inheritance / lunch | repaired for TWRP 16, compiles |
 | boot+recovery header layout | matched to stock byte layout |
 | super / A/B partition sizes | resolved from the stock 9008 package |
 | kernel / DTB / DTBO prebuilts | byte-identical to stock, verified |
-| build (compile) verification | **not run in this task** - see *Verification* |
+| build (compile) verification | `lunch` + `mka recoveryimage` pass (t4) |
 | FBE / metadata decryption | **not supported yet**, deliberately not claimed |
 | on-device (real hardware) verification | **not done**, requires the phone |
 
@@ -49,6 +49,21 @@ Evidence: the stock 9008 package declares `recovery_a`/`recovery_b`
 footer (`AVBf`, `original_image_size` 0x03A87000).  Its kernel is byte-identical
 to the stock `boot.img` kernel.
 
+### Partition copy-out directories stay at the AOSP defaults
+
+`TARGET_COPY_OUT_PRODUCT` and `TARGET_COPY_OUT_ODM` are deliberately **not**
+set, so they keep the defaults `system/product` and `vendor/odm`
+(`build/make/core/board_config.mk:713-716`, `:822-826`).
+
+Setting them to the standalone values `product` / `odm` activates the
+`check_image_config` guard in `build/make/core/board_config.mk:404-414`, which
+then demands `BOARD_PREBUILT_PRODUCTIMAGE` / `BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE`
+(resp. the odm pair) and aborts even `lunch` with
+`If TARGET_COPY_OUT_PRODUCT is 'product', either BOARD_PREBUILT_PRODUCTIMAGE or BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE must be set.`
+This device builds no `product.img`/`odm.img`, so those directories are not
+wanted and the guard must stay inactive.  (`TARGET_COPY_OUT_VENDOR := vendor`
+is fine - `BOARD_VENDORIMAGE_FILE_SYSTEM_TYPE` is set.)
+
 ### Prebuilts
 
 | File | sha256 | Identity |
@@ -71,9 +86,9 @@ The generated 8.5 GiB value was wrong.
 
 1. **Crypto (FBE) is not enabled.**  `TW_INCLUDE_CRYPTO := false`.
    The Qualcomm qseecom/keymaster stack that the decryption path needs is not in
-   this repository, and no decryption has been tested on hardware.  See the
-   `proprietary-files.txt` template and the commented service definitions in
-   `recovery/root/init.recovery.qcom.rc`.
+   this repository, and no decryption has been tested on hardware.  The
+   commented service definitions in `recovery/root/init.recovery.qcom.rc` name
+   the exact blobs that have to be extracted first.
 2. **Touch driver is unknown.**  `TW_INPUT_BLACKLIST` was removed because the
    generated `hbtp_vm` does not exist in the stock kernel or DTB.  Identify the
    real driver with `cat /proc/bus/input/devices` under TWRP and re-add the
@@ -82,49 +97,83 @@ The generated 8.5 GiB value was wrong.
    `Image`; nothing in the stock evidence shows recovery needing external
    modules (`recovery/root/lib/modules` loading is only needed if
    `TW_LOAD_VENDOR_MODULES` gets enabled, which it is not).
-4. **`bootctrl.lito` may not resolve.**  It belongs to a Qualcomm bootctrl repo
-   that this manifest may not contain; `device.mk` notes how to drop it.
+4. **`bootctrl.lito` is not requested.**  No `hardware/qcom-caf/bootctrl` in this
+   manifest, and TWRP does not need a boot control HAL.  Re-add it only when an
+   implementation exists.
 5. **Partition sizes describe the factory GPT.**  A modified device can differ;
    re-read them on hardware before flashing anything.
 
-## Verification
+## Building
 
-Compile verification (runs against the real sources in WSL, read-only w.r.t.
-them) and the evidence checker live in `tools/`.
+The device tree has to be visible as `device/zte/P725A02` in the checkout:
+
+```bash
+cp -r /mnt/d/Projects/Github/yarp_device_zte_P725A02 ~/workdir/TWRP-Test/device/zte/P725A02
+cd ~/workdir/TWRP-Test
+source build/envsetup.sh
+lunch twrp_P725A02 bp2a eng
+mka recoveryimage
+```
+
+Use the **three-argument** form.  Android 16's `lunch` also accepts a single
+`<product>-<release>-<variant>` argument, but only that exact shape:
+
+* `lunch twrp_P725A02-eng` is read as a legacy combo, silently gives
+  `variant=""` and fails with `Invalid lunch combo: twrp_P725A02-eng`.
+* `lunch twrp_P725A02` (or `lunch twrp_P725A02 eng`) would default
+  `TARGET_RELEASE` to `trunk_staging`, which does not exist in this
+  manifest and aborts in `build/make/core/release_config.mk:142` with
+  `Missing config trunk_staging`.  This branch ships `bp2a` (and ap2a/ap3a/
+  ap4a/bp1a) in `build/release/release_configs/`.
+
+`COMMON_LUNCH_CHOICES := twrp_P725A02-eng` in `AndroidProducts.mk` is kept for
+Tab completion and `list_products` metadata; it does not make the dashed combo
+buildable.
+
+Expected artifacts:
+
+```
+out/target/product/P725A02/recovery.img          # must be <= 100663296 B
+out/target/product/P725A02/ramdisk-recovery.img  # the TWRP ramdisk
+out/target/product/P725A02/dtb.img
+out/target/product/P725A02/dtbo.img
+```
+
+Header check for the produced image (optional, needs magiskboot):
+
+```bash
+magiskboot unpack -h recovery.img   # expect header v2, pagesize 4096,
+                                    # kernel_offset 0x00008000,
+                                    # ramdisk_offset 0x01000000,
+                                    # dtb_offset 0x01f00000
+```
+
+## Independent evidence checks
+
+The numeric claims above can be re-derived from the repository alone; no
+build is needed.
 
 ```powershell
-# static evidence check (Windows side, no build; 82 assertions)
-powershell -NoProfile -File tools\verify-device-tree.ps1
+# prebuilts are byte-identical to the stock artifacts
+Get-FileHash prebuilt/kernel  -Algorithm SHA256   # == stock/boot/split_img/boot.img-kernel
+Get-FileHash prebuilt/dtb.dtb -Algorithm SHA256   # == stock/boot/split_img/boot.img-dtb
+
+# partition sizes straight out of the 9008 package (label / sectors / sector size)
+Select-String -Path stock/rawprogram0.xml -Pattern 'label="super"'
+Select-String -Path stock/rawprogram4.xml -Pattern 'label="(boot|recovery|dtbo)_[ab]"'
+
+# the two blocking copy-out variables must NOT appear uncommented
+Select-String -Path BoardConfig.mk -Pattern '^TARGET_COPY_OUT_(PRODUCT|ODM)'   # no output
 ```
 
 ```bash
-# real build, inside WSL.  The device tree must be visible as
-# device/zte/P725A02 in the checkout first, e.g.
-#   cp -r /mnt/d/Projects/Github/yarp_device_zte_P725A02 ~/workdir/TWRP-Test/device/zte/P725A02
-cd ~/workdir/TWRP-Test
-source build/envsetup.sh
-lunch twrp_P725A02-eng
-mka recoveryimage
-# expected artifact:
-#   out/target/product/P725A02/recovery.img
-# quick artefacts to inspect afterwards:
-#   out/target/product/P725A02/recovery.img          (<= 100663296 B)
-#   out/target/product/P725A02/ramdisk-recovery.img  (the TWRP ramdisk)
-#   out/target/product/P725A02/dtb.img, dtbo.img
-# and inside recovery.img verify the header with, e.g.:
-#   magiskboot unpack -h recovery.img
-#   -> header v2, pagesize 4096, kernel_offset 0x00008000,
-#      ramdisk_offset 0x01000000, dtb_offset 0x01f00000
+# same checks from WSL
+cd ~/workdir/TWRP-Test/device/zte/P725A02
+sha256sum prebuilt/kernel prebuilt/dtb.dtb \
+  /mnt/d/Projects/Github/yarp_device_zte_P725A02/stock/boot/split_img/boot.img-kernel \
+  /mnt/d/Projects/Github/yarp_device_zte_P725A02/stock/boot/split_img/boot.img-dtb
+grep -nE '^(TARGET_COPY_OUT_(PRODUCT|ODM)|BOARD_(SUPER|RECOVERYIMAGE)_PARTITION_SIZE)' BoardConfig.mk
 ```
-
-### Build status in this task
-
-The static checker above is the verification that was executed here (82/82
-pass).  The full `lunch` + `mka recoveryimage` compile was **not** executed by
-this task: staging the tree into the shared `~/workdir/TWRP-Test` checkout was
-refused by the execution sandbox, and the task brief explicitly leaves syncing
-that directory to the verification task.  Nothing in this device tree has been
-proven to compile yet.
 
 ## Flashing (informational only - this project never flashes automatically)
 
