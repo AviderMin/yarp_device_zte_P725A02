@@ -11,7 +11,11 @@
 #   apdp                        64 x 4096 =    262144（:51）
 #   logdump                  16384 x 4096 =  67108864（:58，已写在 recovery.fstab）
 #
-# image=/flashimg= 让 TWRP 以裸镜像方式备份与刷写该分区。
+# flashimg=1 让 TWRP 以裸镜像方式备份与刷写该分区（partition.cpp 里置 Can_Flash_Img）。
+# 不要写 `image=<挂载点>`：twrp.flags 的解析器只认 bootable/recovery/partition.cpp
+# 中 tw_flags 表里的标志，该表里没有 image=，写了只会得到
+#   E:Unhandled flag: 'image=...'
+# 裸镜像能力完全由 flashimg= 提供，image= 没有任何作用。回归检查：本文件不得出现 image=。
 # 刻意不写 `primary`：primary 会固定使用无槽位的设备节点，而本机是 A/B，
 # 真实节点是 <name>_a / <name>_b。
 #
@@ -23,16 +27,16 @@
 
 # 挂载点             文件系统  设备                              设备2   flags
 # ---------------------------------------------------------------- [已证实]
-/boot                emmc    /dev/block/by-name/boot                     flags=slotselect;display="Boot";backup=1;flashimg=1;image=/boot
-/recovery            emmc    /dev/block/by-name/recovery                 flags=slotselect;display="Recovery";backup=1;flashimg=1;image=/recovery
-/dtbo                emmc    /dev/block/by-name/dtbo                     flags=slotselect;display="DTBO";backup=1;flashimg=1;image=/dtbo
-/vbmeta              emmc    /dev/block/by-name/vbmeta                   flags=slotselect;display="VBMeta";backup=1;flashimg=1;image=/vbmeta
-/vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta System";backup=1;flashimg=1;image=/vbmeta_system
-/apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1;image=/apdp
+/boot                emmc    /dev/block/by-name/boot                     flags=slotselect;display="Boot";backup=1;flashimg=1
+/recovery            emmc    /dev/block/by-name/recovery                 flags=slotselect;display="Recovery";backup=1;flashimg=1
+/dtbo                emmc    /dev/block/by-name/dtbo                     flags=slotselect;display="DTBO";backup=1;flashimg=1
+/vbmeta              emmc    /dev/block/by-name/vbmeta                   flags=slotselect;display="VBMeta";backup=1;flashimg=1
+/vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta System";backup=1;flashimg=1
+/apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1
 
 # ---------------------------------------------------------------- [已证实]
 # 调制解调器固件族（槽位选择；dsp/bluetooth 属于 modem）
-/modem               emmc    /dev/block/by-name/modem                    flags=slotselect;display="Modem";backup=1;flashimg=1;image=/modem
+/modem               emmc    /dev/block/by-name/modem                    flags=slotselect;display="Modem";backup=1;flashimg=1
 /dsp                 emmc    /dev/block/by-name/dsp                      flags=slotselect;backup=1;subpartitionof=/modem
 /bluetooth           emmc    /dev/block/by-name/bluetooth                flags=slotselect;backup=1;subpartitionof=/modem
 
@@ -40,13 +44,13 @@
 # 以下名称来自原厂 recovery 镜像自带的 fstab（/persistent→frp、/msadp、/ztecfg、
 # 以及高通惯用的 modemst1/modemst2/fsg/fsc），本仓库的 XML 分区表中没有出现，
 # 因此未经真机确认前不要用它们刷写；节点不存在时 TWRP 会直接忽略。
-/persistent          emmc    /dev/block/by-name/frp                      flags=display="Persistent (frp)";backup=1;flashimg=1;image=/persistent
-/msadp               emmc    /dev/block/by-name/msadp                     flags=display="MSADP";backup=1;flashimg=1;image=/msadp
-/ztecfg              emmc    /dev/block/by-name/ztecfg                    flags=display="ZTECFG";backup=1;flashimg=1;image=/ztecfg
-/fsg                 emmc    /dev/block/by-name/fsg                      flags=display="FSG";backup=1;flashimg=1;image=/fsg
-/fsc                 emmc    /dev/block/by-name/fsc                      flags=display="FSC";backup=1;flashimg=1;image=/fsc
-/modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem ST1";backup=1;flashimg=1;image=/modemst1
-/modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem ST2";backup=1;flashimg=1;image=/modemst2
+/persistent          emmc    /dev/block/by-name/frp                      flags=display="Persistent (frp)";backup=1;flashimg=1
+/msadp               emmc    /dev/block/by-name/msadp                     flags=display="MSADP";backup=1;flashimg=1
+/ztecfg              emmc    /dev/block/by-name/ztecfg                    flags=display="ZTECFG";backup=1;flashimg=1
+/fsg                 emmc    /dev/block/by-name/fsg                      flags=display="FSG";backup=1;flashimg=1
+/fsc                 emmc    /dev/block/by-name/fsc                      flags=display="FSC";backup=1;flashimg=1
+/modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem ST1";backup=1;flashimg=1
+/modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem ST2";backup=1;flashimg=1
 
 # 可移动存储（原厂 recovery.fstab 用 voldmanaged 设备通配符；TWRP 侧用 auto 更稳）
 /usb_otg             vfat    auto                                       flags=display="USB-OTG";storage;wipeingui;removable

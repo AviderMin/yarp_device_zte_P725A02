@@ -15,11 +15,37 @@
 #<src>                                                  <mnt_point>            <type>  <mnt_flags and options>                 <fs_mgr_flags>
 
 # ---- Logical partitions inside super (slot selected, AVB via vbmeta_system)
+#
+# 本机 super 里只有 system / product / vendor 三个逻辑分区。system_ext 与 odm
+# **不是**独立分区：前者内容在 system 镜像内的 /system/system_ext（根目录的
+# /system_ext 是指向它的符号链接），后者内容在 vendor 镜像内的 /vendor/odm。
+# 所以 super 元数据里不存在 system_ext_<slot> / odm_<slot>，这两条条目不能写。
+#
+# TWRP 侧机理（bootable/recovery/partitionmanager.cpp）：
+#   TWPartitionManager::Setup_Super_Devices() 调 fs_mgr::CreateLogicalPartitions()，
+#   只按 super 当前槽位（ro.boot.slot_suffix=_b）元数据里的 enabled 分区创建
+#   /dev/block/dm-*；随后 Prepare_Super_Volume() 用 "<名字><槽位>"（如 system_ext_b）
+#   去查该 dm 节点，查不到就打印 "unable to update logical partition"，并在
+#   partitionmanager.cpp:387 处把该条目直接丢弃（不崩溃，但会让日志与
+#   "Super (N) partitions" 计数失真）。log/recovery.txt:42-43 与 :59-60 就是这两条。
+#
+# 证据（全部可在本仓库或 log/ 内独立复核）：
+#   1. 同一次映射里 system/product/vendor 拿到 dm-4/dm-3/dm-5（log/recovery.txt:36/49/54），
+#      唯独 system_ext_b、odm_b 不存在——同一份 super 元数据不会只缺这两个名字。
+#   2. 原厂 stock/boot/ramdisk/fstab.qcom 与 stock/vendor/etc/fstab.default 都只把
+#      system/product/vendor 标为 logical,first_stage_mount，没有 system_ext、没有 odm。
+#   3. stock/config/ 只有 system/product/vendor 的 fs_config、file_contexts 与 *_size.txt。
+#   4. odm/system_ext 的内容在父镜像里：stock/vendor/odm/etc/build.prop（ro.odm.*）、
+#      stock/system/system/system_ext/etc/build.prop（ro.system_ext.*，与 system 同为
+#      Android 12 qssi 构建）、以及 stock/system/system_ext 这个符号链接本身。
+#   5. 原厂 stock/product/etc/build.prop:25 的
+#      ro.product.ab_ota_partitions=system,product,vbmeta_system 里也没有这两个名字。
+#
+# 挂载后内容照样可达：/system_root/system/system_ext 与 /vendor/odm，无需单列分区。
+# 回归检查：本文件不得再出现以 system_ext / odm 为 src 的逻辑分区行。
 system                                                  /system                ext4    ro,barrier=1                             wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
-system_ext                                              /system_ext            ext4    ro,barrier=1                             wait,slotselect,avb=vbmeta_system,logical,first_stage_mount,optional
 product                                                 /product               ext4    ro,barrier=1,discard                     wait,slotselect,avb=vbmeta_system,logical,first_stage_mount
 vendor                                                  /vendor                ext4    ro,barrier=1,discard                     wait,slotselect,avb,logical,first_stage_mount
-odm                                                     /odm                   ext4    ro,barrier=1,discard                     wait,slotselect,avb,logical,first_stage_mount,optional
 
 # ---- Metadata (FBE key storage, wrapped keys via keymaster)
 /dev/block/bootdevice/by-name/metadata                      /metadata              ext4    noatime,nosuid,nodev,discard             wait,check,formattable,wrappedkey
@@ -34,6 +60,28 @@ odm                                                     /odm                   e
 # 包在 /metadata/vold/metadata_encryption；本镜像 TW_INCLUDE_CRYPTO := false 且未带
 # qseecom/keymaster 库与服务，因此无法解密，挂载失败属已知限制；任何情况下都不要格式化
 # userdata（唯一能真正修好 /data 的路径是补齐原厂 crypto blobs 并实机验证）。
+#
+# 实机日志（log/dmesg.txt、log/recovery.txt）证明：/data 的失败发生在比 FBE 更早的一层。
+# 内核 F2FS 驱动在同一块设备上先后探测两个 superblock，两个 magic 都不对：
+#   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0x5243fa92)   # 1st superblock
+#   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0xc7c8d9ea)   # 2nd superblock
+#   F2FS-fs (sda9): Can't find valid F2FS filesystem in 1th/2th superblock
+# 同一时刻 /metadata(sda6)、persist(sda2)、system/product/vendor 全部正常挂载，说明块设备
+# 与 USB/SELinux 都不是瓶颈；只有 sda9 找不到 F2FS 签名，TWRP 因此报 "Can't probe device
+# /dev/block/sda9" 与 "Failed to mount '/data' (Invalid argument)"。
+#
+# 结论：/dev/block/sda9 原始设备上不存在有效的 F2FS superblock。FBE/ICE 只加密文件内容与
+# 文件名，不会让 superblock 变成另一个 magic，所以这**不是**解密缺失导致的失败，也不是
+# 任何 fstab 选项（inlinecrypt / checkpoint / reservedsize / sysfs_path）能修的：
+# 在本文件里加多少个 flag 都改变不了原始设备的字节。
+# 因此本行刻意保持与原厂 recovery 镜像 recovery.fstab **逐字节一致**（已用脚本核对），
+# 不做无依据的选项改动。
+#
+# 处理原则（保护现有数据）：不要格式化 /data，不要 mke2fs/make_f2fs，不要 fsck -y。
+# 现在能做且不做任何写入的取证命令（在 TWRP 的 adb shell 里）：
+#   dd if=/dev/block/sda9 bs=4096 count=2 2>/dev/null | od -A d -t x4 | head
+# 期望看到 magic 0xf2f52010；若仍不是，则须先在 PC 侧用原厂 9008 包评估该分区是否
+# 被改过，然后再谈恢复，绝不能在设备上直接格式化。
 /dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
 
 # ---- Persistent firmware / properties

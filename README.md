@@ -8,7 +8,7 @@
 
 | 项目 | 状态 |
 |---|---|
-| fstab / 分区布局 | 已按原厂 recovery 镜像与 9008 包证据重写 |
+| fstab / 分区布局 | 已按原厂 recovery 镜像与 9008 包证据重写；super 的实际内容已用实机日志核对（只有 system / product / vendor，见「super 的实际内容」） |
 | 产品继承 / lunch | 已适配 TWRP 16，可编译 |
 | boot 与 recovery 镜像头布局 | 与原厂字节布局逐项一致 |
 | super / A/B 分区尺寸 | 已由原厂 9008 救砖包确定 |
@@ -17,7 +17,7 @@
 | 编译验证 | **通过**（`mka recoveryimage` 成功产出 recovery.img） |
 | 镜像结构核对 | **通过**（镜像头、内核、DTB、ramdisk 内容逐项核对） |
 | FBE / metadata 解密 | **不支持**，明确不宣称 |
-| 实机验证（显示 / 触摸 / 挂载 / 引导） | **尚未进行**，必须有真机 |
+| 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：已拿到一次实机运行的 `log/`；显示、触摸、logical 分区、`/metadata` 均正常，`/data` 无法挂载（原因见实机检查清单 6a） |
 
 ## 重要风险提示（请先读）
 
@@ -29,7 +29,13 @@
    设备上，该镜像无法通过厂商签名校验，可能直接拒绝引导；在已解锁设备上可引导，
    但请知悉其签名不具备任何可信度。
 3. **解锁引导器通常要求清空用户数据**，请先自行备份，且本项目**不做任何自动刷写**。
-4. **显示与触摸依赖设备的 dtbo 分区。** 面板与触摸的 overlay 不在本 recovery 镜像内，
+4. **`/data` 挂载失败属于分区本身的问题，不是本设备树的配置问题，也不要靠格式化来“修”。**
+   实机 `log/dmesg.txt` 显示内核 F2FS 驱动在 `/dev/block/sda9` 上两个 superblock 的 magic
+   都不等于 `0xf2f52010`；同一时刻其它分区全部正常挂载。也就是说该分区当前不是有效的 F2FS。
+   任何 `recovery.fstab` 选项都改变不了这一点。**不要格式化 userdata / 不要 `make_f2fs` /
+   不要 `fsck -y`**，否则可能毁掉本来可恢复的数据。详细依据见“实机检查清单”第 6a 条。
+
+5. **显示与触摸依赖设备的 dtbo 分区。** 面板与触摸的 overlay 不在本 recovery 镜像内，
    而是由引导器从 `dtbo_a`/`dtbo_b` 分区叠加；因此首次实机验证必须确认显示与触摸，
    若该分区被改动过，可能出现黑屏或无触摸。
 
@@ -116,6 +122,50 @@ XML 描述的是**救砖包中的原厂 GPT**；若实机 GPT 被改动过，请
 `BOARD_ZTE_DYNAMIC_PARTITIONS_PARTITION_LIST` 一一对应，避免了组名为 `super` 时
 与 `BOARD_SUPER_DYNAMIC_PARTITIONS_SIZE` 撞车的问题。
 
+### super 的实际内容（只有 system / product / vendor）
+
+实机日志与 `stock/` 物证给出同一个结论：本机 super 当前槽位元数据里只有 `system_b`、
+`product_b`、`vendor_b` 三个逻辑分区，**没有** `system_ext_b`，也没有 `odm_b`。
+
+| 证据 | 内容 |
+|---|---|
+| `log/recovery.txt:36/49/54` | system、product、vendor 各拿到一个 dm 节点（dm-4 / dm-3 / dm-5）并建好 by-name 符号链接 |
+| `log/recovery.txt:42-43`、`:59-60` | system_ext、odm 查不到对应 dm 节点，打印 `unable to update logical partition`；TWRP 随后把这两条从分区列表里丢弃（预期行为，不是崩溃） |
+| `stock/boot/ramdisk/fstab.qcom`、`stock/vendor/etc/fstab.default` | 原厂自己的 fstab 只把 system / product / vendor 标为 `logical,first_stage_mount`，既没有 system_ext 也没有 odm |
+| `stock/config/` | 只有 system / product / vendor 的 fs_config、file_contexts 与 `*_size.txt`，没有 odm / system_ext 的任何一项 |
+| `stock/vendor/odm/etc/build.prop`、`stock/system/system/system_ext/etc/build.prop`、`stock/system/system_ext` | odm 内容在 vendor 镜像的 `/vendor/odm`；system_ext 内容在 system 镜像的 `/system/system_ext`，根目录 `/system_ext` 是指向它的符号链接——正是 AOSP 默认输出目录 `vendor/odm`、`system/system_ext` 下的合并布局 |
+| `stock/product/etc/build.prop:25` | 原厂 `ro.product.ab_ota_partitions=system,product,vbmeta_system`，同样不含 system_ext / odm |
+
+机理（`bootable/recovery/`）：`Setup_Super_Devices()` → `fs_mgr::CreateLogicalPartitions()`
+只按当前槽位元数据里的 enabled 分区建 dm 节点，`Prepare_Super_Volume()` 再用
+`<名字><槽位>`（如 `system_ext_b`）去查；查不到就在 `partitionmanager.cpp:387` 处把该条目
+丢掉。所以把 super 里不存在的分区写进 `recovery.fstab`，只会得到日志噪声与失真的
+`Super (5) partitions` 计数，**不可能**把分区变出来。
+这两条已从 `recovery/root/system/etc/recovery.fstab` 移除，内容改由 `/system`、`/vendor` 覆盖。
+挂载后仍可访问：`/system_root/system/system_ext`（system 分区内）与 `/vendor/odm`（vendor 分区内）。
+
+真机上只读复核 super 布局：
+
+```sh
+lpdump                     # super 元数据里的分区名，应只有 system_? / product_? / vendor_?
+ls -l /dev/block/mapper/   # 当前槽位实际建出的 dm 名字
+```
+
+顺带一提：这两条上原本的 `optional` 标记对 TWRP 没有意义（日志里是 `Unhandled flag:
+'optional'`），本次一并去掉；同一次开机的 dmesg 里 init 侧也有 2 条 `[libfstab] Warning:
+unknown flag: optional`，数量与这两条一致。
+
+`BoardConfig.mk` 里 `BOARD_ZTE_DYNAMIC_PARTITIONS_PARTITION_LIST`（第 169 行）与
+`AB_OTA_PARTITIONS`（第 20-30 行）也仍按生成器模板列着 `system_ext`、`odm`。两者都没有
+造成上面那两条日志，处理方式如下：组列表只被 soong 的 `super_image.go` 在构建 super.img 时
+读取（`build/make/core/` 下没有引用），对 `recovery.img` 完全没有影响；`AB_OTA_PARTITIONS`
+只会写进 `ro.*.build.ab_ota_partitions` 属性（实机日志里可见），而 TWRP 运行时不读该属性
+（`bootable/recovery/` 里 grep 不到 `ab_ota_partitions`）。因此本轮不改动它们；若以后要用
+本树构建 super/OTA，必须先按上面的结论把 `system_ext`、`odm` 去掉。
+
+**注意**：本轮只改了 ramdisk 内的 fstab，`recovery.img` 必须重新构建并再次独立复验；
+「验证记录」表里的 sha256 是改动前的基线（见该表说明 1）。
+
 ### 预编译产物
 
 | 文件 | sha256 | 身份 |
@@ -133,18 +183,21 @@ XML 描述的是**救砖包中的原厂 GPT**；若实机 GPT 被改动过，请
 原厂 recovery 镜像自带的 `system/etc/recovery.fstab` 同时列出了可挂载文件系统与
 整块分区。TWRP 的惯例是：可挂载的文件系统写进 `recovery.fstab`，
 只能整块备份/刷写的分区写进 `twrp.flags`。因此本项目按此分工拆分，
-并把原厂 fstab 中的**每一个**挂载点都保留在了二者之一：
+并把原厂 fstab 中的**每一个**挂载点都保留在了二者之一（唯一例外是 `/odm`：它只在原厂模板里出现，实机 super 里没有这个分区，详见下表与「super 的实际内容」）：
 
 | 原厂 recovery.fstab 挂载点 | 本项目位置 |
 |---|---|
-| `/system` `/system_ext` `/product` `/vendor` `/odm` `/metadata` `/data` `/mnt/vendor/persist` `/misc` `/vendor/firmware_mnt` `/vendor/dsp` `/vendor/bt_firmware` | `recovery/root/system/etc/recovery.fstab` |
+| `/system` `/product` `/vendor` `/metadata` `/data` `/mnt/vendor/persist` `/misc` `/vendor/firmware_mnt` `/vendor/dsp` `/vendor/bt_firmware` | `recovery/root/system/etc/recovery.fstab` |
 | `/boot` `/recovery` `/apdp` `/persistent`(frp) `/msadp` `/ztecfg` | `recovery/root/system/etc/twrp.flags` |
 | `/sdcard` `/storage/sdcard1` `/storage/usbotg` | `twrp.flags` 中的 `/sdcard1`、`/usb_otg`（TWRP 采用自身可移动存储处理，不用 voldmanaged 通配符） |
-| —（本项目新增） | `recovery.fstab` 的 `/logdump`；`recovery.fstab` 的 `/system_ext`（原厂该分区存在但 fstab 未单列） |
+| —（本项目新增） | `recovery.fstab` 的 `/logdump` |
+| `/odm`（原厂 fstab 列出，但本机 super 里没有该分区） | **不写入** `recovery.fstab`：odm 的内容在 vendor 镜像的 `/vendor/odm`，由 `/vendor` 条目覆盖；原厂 fstab 里根本没有 `/system_ext`，system_ext 的内容在 system 镜像的 `/system/system_ext`（依据见「super 的实际内容」） |
 
 `twrp.flags` 内部对证据做了分级：`[已证实]` 表示名称出现在本仓库 XML 或原厂
 recovery fstab 中；`[待确认]` 表示仅见于原厂 recovery fstab（未出现在本仓库 XML），
 真机上节点不存在时 TWRP 会直接忽略，但**未确认前不要用它刷写**。
+
+同一个道理也适用于 `/odm` 与 `/system_ext`：`/odm` 只出现在原厂 fstab 里（super 元数据里没有它），`/system_ext` 连原厂 fstab 里都没有。把它们写进 `recovery.fstab` 只会让 TWRP 每次开机打印 `unable to update logical partition`，所以两者都不写，内容分别由 `/vendor`、`/system` 覆盖。
 
 ## 验证记录
 
@@ -309,15 +362,149 @@ grep -nE '^(TARGET_COPY_OUT_(PRODUCT|ODM)|BOARD_(SUPER|RECOVERYIMAGE)_PARTITION_
 3. **显示与触摸**：界面方向、分辨率、背光是否正常；触摸是否可用；
    必要时用 `cat /proc/bus/input/devices` 记录输入设备名，判断是否需要设置
    `TW_INPUT_BLACKLIST`。
-4. **分区挂载**：能否挂载 `/system`、`/vendor`、`/product`、`/odm`（logical 分区）
-   以及 `/metadata`；`/boot`、`/recovery`、`/dtbo`、`/vbmeta` 是否能被识别。
+4. **分区挂载**：能否挂载三个 logical 分区 `/system`、`/vendor`、`/product`，以及
+   `/metadata`；`/boot`、`/recovery`、`/dtbo`、`/vbmeta` 是否能被识别。
+   **不要**再期待 `/odm`、`/system_ext` 出现在 TWRP 的分区列表里：本机 super 里没有
+   这两个分区（见「super 的实际内容」），odm 的内容在 `/vendor/odm`，system_ext 的内容在
+   `/system_root/system/system_ext`。
 5. **存储与备份**：能否正确识别内部存储与外部存储，备份/恢复是否可用。
 6. **FBE**：当前不支持，进入后应预期无法挂载 `/data`；如需支持，先提取
    qseecom/keymaster 相关文件并单独验证。
+6a. **`/data` 挂载失败的真实根因（已由实机日志确定，2026-10 补充）**：
+   截取的实机日志在 `log/dmesg.txt` 与 `log/recovery.txt`。结论是**原始分区上没有有效的
+   F2FS 文件系统**，而不是“解密不了”：
+
+   ```
+   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0x5243fa92)   ← 1st superblock
+   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0xc7c8d9ea)   ← 2nd superblock
+   F2FS-fs (sda9): Can't find valid F2FS filesystem in 1th superblock
+   F2FS-fs (sda9): Can't find valid F2FS filesystem in 2th superblock
+   ```
+
+   依据与推论：
+
+   * 内核 F2FS 驱动对 `/dev/block/sda9` 先后探测两个 superblock，两处 magic 都不是
+     `0xf2f52010`；一次开机内共记录 56 行 `F2FS-fs (sda9)` 日志（14 轮 × 4 行）。
+   * 同一时刻 `/metadata`(sda6)、`/mnt/vendor/persist`(sda2)、`/logdump`(sde56) 以及
+     system/product/vendor 全部**成功挂载**（本次开机共 22 次成功挂载，全部是 ext4/dm-*/loop*），
+     说明块设备层、UFS 控制器、SELinux 都不是瓶颈；只有 sda9 找不到 F2FS 签名。
+   * 因此 TWRP 的报错链条是
+     `I:Can't probe device /dev/block/sda9` → `I:Unable to mount '/data'` →
+     `Failed to mount '/data' (Invalid argument)`，
+     并且 `/data` 分区尺寸被探测为 0 B、`Mount_Options` 里带 `inlinecrypt`。
+   * FBE/ICE 只加密文件内容与文件名，不会把 superblock 的 magic 变成另一个值。所以
+     “缺 keymaster/qseecom 所以解不开”不能解释 magic mismatch；这一层失败**早于**解密。
+     这也意味着：在 `recovery.fstab` 里增删 `inlinecrypt`、`checkpoint=fs`、
+     `reservedsize=128M`、`sysfs_path=…` 都不会改变结果——原始设备字节没变，没有 fstab
+     选项能让内核重新认识一个不存在的 F2FS superblock。
+   * 已核对：本仓库 `recovery.fstab` 的 `/data` 行与原厂 recovery 镜像内
+     `system/etc/recovery.fstab` 的 `/data` 行**逐字节一致**（把连续空白压成一个空格后
+     完全相同），所以此处不存在“设备树写错选项”的问题。原厂 `fstab.qcom` / `fstab.default`
+     比 recovery 版多一个 `inlinecrypt`，那是正常启动（keymaster 已就绪）才需要的。
+
+   **数据安全（最重要）**：现在**不要**格式化 `/data`，不要 `make_f2fs`/`mke2fs`，
+   不要 `fsck -y`。在确定 sda9 上原本是什么（以及是否已被改写）之前，任何写入都可能让
+   本来可恢复的数据彻底消失。
+
+   不做任何写入的取证命令（TWRP 的 adb shell 内）：
+
+   ```sh
+   dd if=/dev/block/sda9 bs=4096 count=2 2>/dev/null | od -A d -t x4 | head
+   # 期望 0x400 处出现 F2FS magic 0xf2f52010；若仍不是，说明该分区已不是 F2FS，
+   # 需要在 PC 侧用原厂 9008 包先评估分区表/分区内容，再决定恢复方案。
+   ```
+
+   本仓库能做的到此为止：日志证据已归档、配置已确认与原厂一致、且明确禁止格式化。
+   真正的修复必须在设备侧做（恢复原始分区内容），不属于设备树能解决的范围。
 7. **AVB**：确认已解锁设备是否接受测试密钥签名的镜像；如需修改 vbmeta 策略，
    请自行评估风险。
 8. **尺寸回归**：若在真机阶段改动设备树，请重新构建并确认 `recovery.img` 仍
    ≤ 100663296 字节，并重新发起独立复验。
+
+## 实机日志中可忽略项与已定性项（内核 / 触屏 / 格式）
+
+本节把一次实机 recovery 运行（`log/dmesg.txt`、`log/fastbootd/dmesg.txt`、`log/recovery.txt`）里
+除 `/data` 之外的报错逐条定性，避免后续重复调查。结论：**只有 `/data`（sda9）是真故障**（见上文 6a），
+其余三条都不是本设备树能修、也不需要修的问题；其中触屏实测工作正常。
+
+### 1. Goodix 触屏 “cfg bin / 固件缺失 + sensor id mismatch” —— 噪声，且触摸可用
+
+日志表现（`log/dmesg.txt` 与 `log/fastbootd/dmesg.txt` 两次开机完全一致，可复现、非偶发）：
+
+```
+[GTP-ERR][goodix_read_cfg_bin:448] failed get cfg bin[goodix_cfg_group.bin] error:-11, try_times:1
+[GTP-ERR][goodix_read_cfg_bin:448] failed get cfg bin[goodix_cfg_group.bin] error:-11, try_times:2
+[GTP-ERR][goodix_read_cfg_bin:457] get cfg_bin FAILED
+[GTP-ERR][goodix_get_reg_and_cfg:326] pkg:1..9, sensor id contrast FAILED, reg:0x402f
+[GTP-ERR][goodix_get_reg_and_cfg:329] sensor_id from i2c:0, sensor_id of cfg bin:1..9
+[GTP-ERR][goodix_request_firmware:1078] Firmware image [goodix_firmware.bin] not available,errno:-11
+[GTP-ERR][goodix_later_init_thread:564] fw update failed, -11[ignore]
+[GTP-INF][goodix_ts_stage2_init:2540] failed send normal config[ignore]
+```
+
+定性证据：
+
+* **触摸是好的**：同一份 dmesg 里有 5 组真实触摸事件，坐标覆盖到屏幕右下角
+  （`ufp_touch_point: touch_down/up id: 0, coord[851, 2360]` 等），输入设备已注册
+  （`input: goodix_ts as /devices/virtual/input/input4`）。要产生这些事件必须已经点到
+  右下角，说明驱动、I2C、中断、面板链路都正常。
+* **固件目录不是本设备树造成的**：原厂 recovery 镜像的 `ueventd.rc` 写着同一行
+  `firmware_directories /etc/firmware/ /odm/firmware/ /vendor/firmware/ /firmware/image/`，
+  本仓库逐字沿用（`recovery/root/system/etc/ueventd.rc`）；而且原厂 recovery ramdisk 里
+  同样**没有** firmware 目录、也没有这两个 .bin。即原厂 recovery 本身也拿不到这两个文件，
+  这不是 TWRP 相对原厂的回归。
+* **内核固件加载时机决定拿不到**：`goodix_*` 是内核内建驱动，probe 在启动早期完成；此时
+  `/vendor/firmware` 尚未由 TWRP 挂载，`request_firmware` 只能得到 `-11`（EAGAIN，
+  即“当前取不到”）。驱动把关键失败标成 `[ignore]` 并继续，stage2 初始化成功。
+* **sensor id mismatch 是上一条的后果**：`goodix_cfg_group.bin` 取不到，驱动只能用默认
+  （i2c 读到 sensor id 0），于是与 cfg bin 里 pkg 1..9 逐条比对全部失败。
+* **修复边界**：仓库内全量检索 `goodix*` 为 0 命中，两个 .bin 不在本仓库；加路径或改时序
+  都改不了“文件不存在”这一事实。要消掉这些 `GTP-ERR` 只能由厂商把 cfg/固件放进 recovery
+  ramdisk，收益远小于风险，因此本项目不处理。
+
+### 2. QG 的 `Please remove unsupported %) in format string` —— 噪声，非本项目可修
+
+```
+QG-K: qg_topoff_current_cb: Qg: QG_DEFAULT_VOTER topoff(100
+------------[ cut here ]------------
+Please remove unsupported %) in format string
+WARNING: CPU: 7 PID: 128 at lib/vsprintf.c:2171 format_decode+0x44c/0x460
+Call trace: format_decode → vsnprintf → vscnprintf → vprintk_store → vprintk_emit
+            → vprintk_default → vprintk_func → printk → qg_topoff_current_cb+0x4c/0x60
+```
+
+* 这是**原厂内核自身**的 printk 格式串缺陷：某条电池 QG 打印里写了 `%)`，而 `%` 后必须是
+  合法转换字符（字面百分号要写 `%%`）。栈回溯结束在 `qg_topoff_current_cb`，没有本项目代码。
+* 后果只是内核在该处发一次 WARNING 并截断这行日志（`topoff(100` 后面就没了），不改变功能。
+  本项目**不编译内核**（`prebuilt/kernel` 与原厂 `boot.img-kernel` sha256 逐字节相同），
+  设备树侧没有任何手段能改这条格式串。
+* 结论：可忽略，且**不要**为此加 dmesg 抑制——收益低，还会把真实内核报错一起吞掉。
+
+### 3. `DM_DEV_STATUS failed for system_ext_b / product_b` —— 恢复环境预期输出
+
+```
+init: First stage mount skipped (recovery mode)
+init: DM_DEV_STATUS failed for system_ext_b: No such device or address
+init: Could not update logical partition
+init: DM_DEV_STATUS failed for product_b: No such device or address
+```
+
+* 这两行来自**原厂 init 的 first stage**，而紧邻的上一行已说明
+  `First stage mount skipped (recovery mode)`：recovery 模式下 init 不做 first stage mount，
+  槽位后缀 `_b` 对应的 dm 设备本就不会创建，`DM_DEV_STATUS` 必然失败——预期输出，非设备树错误。
+* 它没有阻止 TWRP 工作：TWRP 之后按需建立 `dm-4`(system)、`dm-3`(product)、`dm-5`(vendor)
+  并成功挂载（`EXT4-fs (dm-4/dm-3/dm-5): mounted filesystem`）。
+* `system_ext` / `odm` 为何在 super 里不存在、TWRP 侧为何打印 `unable to update logical partition`，
+  见「super 的实际内容」一节；该问题的配置侧结论已由另一成员在 `recovery.fstab` 落实，本任务不重复改动。
+
+### 汇总
+
+| 日志现象 | 定性 | 本项目可否修 |
+|---|---|---|
+| `F2FS-fs (sda9)` 两个 superblock magic mismatch | **真故障**（原始分区非 F2FS） | 不可（须设备侧处理，见 6a） |
+| Goodix cfg/固件缺失 + sensor id mismatch | 恢复环境固有噪声，触摸实测正常 | 否（bin 不在仓库，原厂 recovery 同样没有） |
+| `unsupported %) in format string` + WARNING | 原厂内核 printk 缺陷，无功能影响 | 否（不编译内核） |
+| `DM_DEV_STATUS failed for system_ext_b/product_b` | recovery 模式预期输出 | 否（无需修） |
 
 ## 刷写说明（仅供参考，本项目从不自动刷机）
 
