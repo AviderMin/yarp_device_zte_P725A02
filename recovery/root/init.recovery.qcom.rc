@@ -148,9 +148,20 @@ on fs
     wait /dev/block/bootdevice/by-name/ssd 10
     start vendor.qseecomd
 
-# The HALs must wait for qseecomd's listeners *and* hwservicemanager; without
-# that gate they call QSEECom_start_app before QSEE is ready and crash-loop.
-on property:hwservicemanager.ready=true && property:vendor.sys.listeners.registered=true
+# The HALs must wait for the QSEE daemon to be *running* and for its listeners to
+# be registered, plus hwservicemanager.  Without that gate they call
+# QSEECom_start_app before QSEE is ready and crash-loop.
+#
+# Why both conditions, and why the process state matters:
+#   * vendor.sys.listeners.registered is published by qseecomd itself and is the
+#     only vendor.sys.* property the stock binary sets; it is the semantic
+#     "QSEE listeners are up" signal.
+#   * init.svc.vendor.qseecomd = running is set by init the moment the service is
+#     actually forked (system/core/init/service.cpp:173-192 NotifyStateChange,
+#     called from the process-start path at :783/:884 / :409).  A property set by
+#     a process that failed to start can therefore never satisfy this action, so
+#     the HAL bring-up cannot be triggered by a stale property alone.
+on property:init.svc.vendor.qseecomd=running && property:vendor.sys.listeners.registered=true && property:hwservicemanager.ready=true
     start keymaster-4-0
     start gatekeeper-1-0
 
@@ -186,3 +197,50 @@ service gatekeeper-1-0 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-se
     setenv LD_LIBRARY_PATH /vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64
     disabled
     seclabel u:r:recovery:s0
+# ---------------------------------------------------------------------------
+# keystore2 is NOT started from here.
+#
+# The only ordering that decides whether metadata decryption can succeed on its
+# single attempt is "keymaster HAL registered -> keystore2 serves
+# getSecurityLevel(TRUSTED_ENVIRONMENT) -> vold can export the wrapped storage
+# key".  Starting keystore2 from `on late-init` (the stock trigger in
+# bootable/recovery/etc/init/keystore2.rc) leaves that ordering to a race:
+#
+#   TWPartitionManager::Decrypt_Data()             partitionmanager.cpp:599-651
+#     -> android::vold::fscrypt_mount_metadata_encrypted()
+#        -> KeyStorage::exportWrappedStorageKey()   system/vold/KeyStorage.cpp:156
+#           -> Keystore::Keystore()                 system/vold/Keystore.cpp:112-143
+#              AServiceManager_checkService("android.system.keystore2.IKeystoreService/default")
+#              polled 300 x 100 ms  =  a real 30 s blocking barrier, but only for
+#              keystore2 - never for the keymaster HAL
+#              -> getSecurityLevel(TRUSTED_ENVIRONMENT)
+#                 resolved from keystore2's cache, filled eagerly at its startup:
+#                   service.rs:65-79        constructs SecurityLevel::TRUSTED_ENVIRONMENT
+#                                           and treats failure as fatal
+#                   security_level.rs:92-97 -> globals.rs:344 get_keymint_device()
+#                   globals.rs:230-246      -> retry_get_interface()
+#                   utils.rs:665-684        retry_count = 1 unless cfg!(early_vm), so
+#                                           binder::get_interface() is a ONE-SHOT
+#                                           lookup that fails at once (NAME_NOT_FOUND)
+#
+# A keystore2 that starts before the HAL registers therefore exits during startup
+# and is restarted every 5 s (system/core/init/service.h:236) while the HAL is
+# still coming up; nothing retries the failed lookup, and after the fourth exit
+# the `critical` flag makes init reboot to the fatal target
+# (system/core/init/service.cpp:383-384).  The observable failure is not a crash
+# dialog but "I:Unable to decrypt metadata encryption" on a device that has no
+# passphrase at all.
+#
+# The start therefore lives in recovery/root/system/etc/init/keystore2.rc, which
+# overrides the platform file of the same name in the recovery ramdisk and starts
+# keystore2 on property:init.svc.keymaster-4-0=running.  Keep the two files in
+# sync: this file must never start keystore2 again.
+#
+# Residual gap (stated here so it is not mistaken for solved): init.svc.<name>
+# reports process state, not hwbinder registration, and init has no primitive
+# that blocks another process on a service registration.  TWRP's decrypt path
+# reads no readiness property either, so a formally guaranteed happens-before
+# between "keymaster registered" and "Decrypt_Data() called" cannot be
+# expressed in a device-tree rc file.  What the device tree makes deterministic
+# is the ordering keystore2 observes; the platform-side wait that would close
+# the remaining window is recorded in README (search "keystore2 启动顺序").

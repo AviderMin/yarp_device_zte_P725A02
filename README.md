@@ -395,7 +395,7 @@ magiskboot unpack -h recovery.img   # 期望 header v2、pagesize 4096、
 
 ## FBE 限制与 AVB 签名限制
 
-### FBE（当前不支持）
+### FBE / metadata 解密（已编译进来，未在真机复验）
 
 原厂把密钥管理实现为 vendor 分区里的 HIDL 服务，由 vendor 的 init 脚本启动，例如
 `stock/vendor/bin/qseecomd`、
@@ -418,6 +418,59 @@ qseecomd / keymaster@4.0 / gatekeeper@1.0 与它们的库依赖闭包（含 gate
 `recovery/root/init.recovery.qcom.rc` 中（`on fs` 启动 qseecomd，等
 `vendor.sys.listeners.registered` 后再由属性触发器拉起两个 HAL）。
 
+### keystore2 启动顺序（t4：唯一一次解密尝试的胜负手）
+
+解密只有一次机会：`Decrypt_Data()`（`partitionmanager.cpp:599-651`）在
+`Setup_Fstab_Partitions()` 里被调用一次，失败后没有任何自动重试，用户看到的就是那个永远
+解不开的密码页。整条链路上真正有阻塞等待的只有一处：
+
+```
+Decrypt_Data()
+  -> vold::fscrypt_mount_metadata_encrypted()
+     -> KeyStorage::exportWrappedStorageKey()        system/vold/KeyStorage.cpp:156
+        -> Keystore::Keystore()                      system/vold/Keystore.cpp:112-143
+           poll IKeystoreService/default 300 x 100 ms   <- 真的等，但只等 keystore2
+           -> getSecurityLevel(TRUSTED_ENVIRONMENT)
+              keystore2 用启动时就已经建好的 SecurityLevel 回答：
+                service.rs:65-79      构造 TRUSTED_ENVIRONMENT，失败即致命
+                security_level.rs:92  -> globals.rs:344 get_keymint_device()
+                globals.rs:230        -> retry_get_interface()
+                utils.rs:665          retry_count = 1 unless cfg!(early_vm)
+                                      => binder::get_interface() 一次性查询，
+                                         未注册立刻 NAME_NOT_FOUND
+```
+
+也就是说：**vold 会等 keystore2，但不会等 keymaster HAL**。如果 keystore2 先起来，它在启动
+阶段就因为拿不到 TEE SecurityLevel 而退出，之后每 5 秒被重启一次
+（`system/core/init/service.h:236`），那些失败的查询不会被重试；第四次退出后
+`critical window=0` 会让 init 直接重启到 fatal target（`service.cpp:383-384`）。现象与“设备
+没有密码”完全一致。
+
+因此本设备树把 keystore2 的启动点从平台默认的 `on late-init` 挪到 HAL 之后：
+
+* `recovery/root/system/etc/init/keystore2.rc` 覆盖同名平台文件（ramdisk 覆盖层），触发条件
+  改为 `on property:init.svc.keymaster-4-0=running`；service 定义逐字节保留平台版本（含
+  `critical window=0` 与 `u:r:recovery:s0`）。
+* `recovery/root/init.recovery.qcom.rc` 不再启动 keystore2，两个 HAL 的启动条件也补上
+  `init.svc.vendor.qseecomd=running`（init 自己 fork 成功才置位）——这样“qseecomd 挂掉但
+  残留属性还在”的旧触发方式不会再生效。
+
+**仍然存在的空档（明说，不当作已修好）**：`init.svc.<name>` 是进程状态，不等于 hwbinder
+注册；init 也没有“阻塞等待另一个进程完成服务注册”的原语，而 TWRP 的解密路径不读任何就绪
+属性。因此从设备树 rc 无法建立“HAL 已注册 -> 才调用 Decrypt_Data()”的严格 happens-before。
+要彻底闭合，需要一处 platform 改动，二选一：
+
+1. 让解密路径等项目已就绪的信号（最贴近现有代码）：在 `system/vold/Keystore.cpp` 的
+   `getSecurityLevel()` 之后判空时重试/等待，或让 keystore2 在 `get_keymint_device()` 失败时
+   自身阻塞重试（`retry_get_interface()` 的 `retry_count` 在非 early_vm 构建上恒为 1，改这里
+   等于给 keymaster 补上 vold 早就有的那种等待）；再在 TWRP 侧于 `Decrypt_Data()` 前用
+   `android::base::WaitForProperty("init.svc.keymaster-4-0", "running")` 之类的显式前置条件。
+2. 或者把“HAL 已注册”变成一个 init 能观察、TWRP 会读的属性，并在解密的唯一入口处检查它。
+
+两条都改在 WSL 源码树之外无法完成（本设备树仓库只含 device tree），当前状态记为：设备树侧可
+确定的顺序已经做足，剩余窗口需要上述 platform 改动。回归检查：
+`node tools/check_decrypt_ordering.mjs`（21 项，覆盖触发条件、keystore2 触发点、可达性，以及
+“没有用 sleep 伪装同步”）。
 ### AVB 签名（使用公开测试密钥）
 
 `BOARD_AVB_ENABLE := true`，`BOARD_AVB_RECOVERY_KEY_PATH` 指向
