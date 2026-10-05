@@ -297,11 +297,16 @@ TW_HAS_EDL_MODE := true
 # (writing it buzzes the phone; this tree never does it automatically).
 
 # ------------------------------------------------------------- Crypto (FBE)
-# Deliberately NOT enabled.  See device.mk: turning TW_INCLUDE_CRYPTO on only
-# compiles the plumbing; the real FBE/ICE decryption path still needs the
-# Qualcomm keymaster/qseecom blobs from the stock vendor partition and has to be
-# validated on hardware.  Claiming it from a build flag alone would be false.
-TW_INCLUDE_CRYPTO := false
+# /data is metadata-encrypted: the raw userdata block device intentionally has
+# no plaintext F2FS superblock.  TWRP must first unwrap the metadata key stored
+# under /metadata/vold/metadata_encryption and create the dm-default-key mapping;
+# trying to mount /dev/block/sda9 directly always produces a magic mismatch.
+# Keep the vendor additional.fstab path because it supplies the stock inlinecrypt
+# option.  Qualcomm FBE support and metadata decryption must be compiled in.
+TW_INCLUDE_CRYPTO := true
+TW_INCLUDE_CRYPTO_FBE := true
+TW_INCLUDE_FBE_METADATA_DECRYPT := true
+TW_USE_FSCRYPT_POLICY := 2
 
 # Encryption
 BOARD_USES_METADATA_PARTITION := true

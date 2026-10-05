@@ -75,23 +75,11 @@ PRODUCT_PROPERTY_OVERRIDES += \
     ro.adb.secure=0
 
 # ------------------------------------------------------------------ Crypto
-# NOT enabled on purpose.  Setting TW_INCLUDE_CRYPTO only pulls the TWRP crypto
-# plumbing into the ramdisk; the actual FBE/ICE decryption path needs the
-# Qualcomm keymaster/qseecom stack that lives in the stock vendor image
-# (stock/vendor/lib64/libQSEEComAPI.so, libkeymasterdeviceutils.so,
-# libkeymasterutils.so, libqtikeymaster4.so, libStDrvInt.so, libGPreqcancel*.so,
-# librpmb.so, libssd.so, libsoc_helper.so, libdrm*.so, libsecureui*.so, and
-# stock/vendor/bin/qseecomd) plus the keymaster TA image.  None of those blobs
-# is in this repository and no decryption has been tested on hardware, so crypto
-# support is NOT claimed.  To enable it later:
-#   1. populate proprietary-files.txt (template provided) and run
-#      extract-files.sh against the stock vendor image,
-#   2. set TW_INCLUDE_CRYPTO := true/false accordingly (BoardConfig.mk) and
-#      TW_INCLUDE_CRYPTO_FBE := true / TW_INCLUDE_FBE_METADATA_DECRYPT := true
-#      here (BOARD_USES_METADATA_PARTITION is already set),
-#   3. ship /vendor/bin/{qseecomd,keymasterd} and the keymaster HIDL service in
-#      the ramdisk and start them from init.recovery.qcom.rc (commented
-#      templates are already in that file),
-#   4. verify decryption on the device.
-TW_INCLUDE_CRYPTO := false
-TW_INCLUDE_CRYPTO_FBE := false
+# Build the TWRP FBE and metadata-decryption path.  The raw userdata partition is
+# metadata-encrypted, so a plaintext F2FS superblock only becomes visible after
+# the key in /metadata/vold/metadata_encryption has been unwrapped and the
+# dm-default-key device has been created.  These switches are also set in
+# BoardConfig.mk, where the recovery build consumes them.
+TW_INCLUDE_CRYPTO := true
+TW_INCLUDE_CRYPTO_FBE := true
+TW_INCLUDE_FBE_METADATA_DECRYPT := true
