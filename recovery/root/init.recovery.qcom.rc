@@ -77,6 +77,41 @@ on early-init
     # depends on /vendor, on the vendor mapper node or on twrp.super.* props.
     # ------------------------------------------------------------------
     mkdir /vendor_ramdisk 0755 root root
+    # ------------------------------------------------------------------
+    # The three crypto binaries must be executable, and NOTHING in the build can
+    # arrange that: they are packed 0644 no matter what their mode on disk is.
+    #
+    # mkbootfs does not preserve the source mode.  Every archive entry goes
+    # through fix_stat() (system/core/mkbootfs/mkbootfs.cpp), which unconditionally
+    # overwrites st_mode with the value from fs_config().  fs_config() looks the
+    # path up in <target_out_path>/etc/fs_config_files and then in the compiled-in
+    # table, and for a regular file that is in neither it returns a hardcoded
+    # default (system/core/libcutils/fs_config.cpp:391-395):
+    #
+    #     *mode = (*mode & S_IFMT) | (dir ? 0755 : 0644);
+    #
+    # vendor_ramdisk/** is in no fs_config table -- the entries that do exist are
+    # for system/bin/*, vendor/bin/* and friends -- so these three are always
+    # 0644 in ramdisk-recovery.img.  Verified in the built image, and it is why
+    # the earlier "chmod the staging directory from BOARD_RECOVERY_IMAGE_PREPARE"
+    # attempt could never have worked: that hook runs before the pack, and the
+    # pack discards the mode.  (Do not re-add it; see BoardConfig.mk.)
+    #
+    # Since the pack cannot carry the bit, init has to set it, and init can:
+    # "chmod" is a live builtin (system/core/init/builtins.cpp:1017 do_chmod,
+    # registered at :1288 as {2, 2}) and init's own README documents its argument
+    # order as `chmod <octal-mode> <path>` (system/core/init/README.md:556) --
+    # mode first, which is easy to get backwards.
+    #
+    # early-init is early enough by a wide margin: these services are started from
+    # `on fs` and from property triggers that can only fire after that, and init
+    # runs actions in queue order.  The ramdisk is a writable rootfs, so the
+    # fchmodat() in do_chmod succeeds.  Without this, every fork fails with
+    #   init: cannot execv('/vendor_ramdisk/bin/qseecomd') ... Permission denied
+    # and the service sits in "restarting" forever.
+    chmod 0755 /vendor_ramdisk/bin/qseecomd
+    chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
+    chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
     # Trustlet directory.  libkeymasterdeviceutils.so opens the keymaster TA at
     # the hardcoded /vendor/firmware_mnt/image (that literal string is in the
     # stock library), so this path must exist before keymaster-4-0 runs and must

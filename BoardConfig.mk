@@ -216,6 +216,39 @@ TARGET_USERIMAGES_USE_F2FS := true
 # generated tree had its fstab in the wrong place and it was moved here.
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
 
+# ------------------------------------------- Recovery ramdisk: exec bits
+# NOTHING in the build can make the three executables under
+# recovery/root/vendor_ramdisk/bin/ executable, so this file must not try.
+#
+# The obvious fix -- a chmod on $(TARGET_RECOVERY_ROOT_OUT) from
+# BOARD_RECOVERY_IMAGE_PREPARE, which does run inside the recovery ramdisk recipe
+# (build/make/core/Makefile:2830), after recovery/root has been copied and before
+# the image is packed -- is a NO-OP, and was measured to be one: with that chmod
+# in place the staging directory really was 0755 and the packed ramdisk was still
+# 0644.  mkbootfs rewrites every entry's mode (system/core/mkbootfs/mkbootfs.cpp,
+# fix_stat()) from fs_config(), and for a regular file that is in no fs_config
+# table, fs_config() returns a hardcoded default
+# (system/core/libcutils/fs_config.cpp:391-395):
+#
+#     *mode = (*mode & S_IFMT) | (dir ? 0755 : 0644);
+#
+# vendor_ramdisk/** matches no table entry (the ones that exist cover
+# system/bin/*, vendor/bin/*, first_stage_ramdisk/system/bin/*, ...), so those
+# three files are packed 0644 whatever their mode on disk is.  Committing them as
+# mode 100755 in git would not help either -- the pack ignores it -- and this
+# checkout lives on a Windows filesystem that cannot represent the bit anyway.
+#
+# The executable bit is therefore set at boot by init, the only layer that can
+# still change it (recovery/root/init.recovery.qcom.rc, on early-init):
+#
+#     chmod 0755 /vendor_ramdisk/bin/qseecomd
+#     chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
+#     chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+#
+# `chmod` is a live init builtin (system/core/init/builtins.cpp:1017/:1288) with
+# the argument order `chmod <octal-mode> <path>` (system/core/init/README.md:556).
+# Regression check: tools/verify_decrypt_prereqs.mjs check "rc/exec-bits".
+
 # --------------------------------------------------------- Security patch
 # stock/vendor/build.prop ro.vendor.build.security_patch=2022-01-01 and
 # stock boot.img-os_patch_level=2022-01 both say 2022-01-01; the generated tree
