@@ -69,56 +69,32 @@ on fs
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
 
 # ---------------------------------------------------------------------------
-# Qualcomm secure services needed for FBE / metadata decryption are NOT started.
+# Qualcomm secure services required to unwrap the metadata-encryption key.
 #
-# The stock device implements keymaster/gatekeeper as HIDL services that live in
-# the vendor partition and are started by vendor init scripts, e.g.
-#   stock/vendor/bin/qseecomd
-#   stock/vendor/etc/init/android.hardware.keymaster@4.0-service-qti.rc
-#   stock/vendor/etc/init/android.hardware.gatekeeper@1.0-service-qti.rc
-#   stock/vendor/lib64/{libQSEEComAPI,libkeymasterdeviceutils,libkeymasterutils,
-#                       libqtikeymaster4,libStDrvInt,libGPreqcancel,libGPreqcancel_svc,
-#                       librpmb,libssd,libsoc_helper,libdrm,libdrmfs,libdrmtime,
-#                       libsecureui,libsecureui_svcsock}.so
-# plus the keymaster TA image, which is NOT in vendor: it is the signed content
-# of the dedicated keymaster partition (stock/rawprogram4.xml:12 keymaster_a).
-#
-# The recovery ramdisk at ~/workdir/twrpgen/recovery.img does not contain any of
-# those libraries or services (verified by extracting its 433 cpio entries), and
-# they are not in this repository either.  TWRP's crypto support is therefore
-# left OFF (BoardConfig.mk TW_INCLUDE_CRYPTO := false, see device.mk).
-# Do not claim working decryption until the blobs are extracted AND the result
-# has been verified on the device.  When they are available, the services to
-# declare here should mirror the STOCK definitions exactly (read from
-# stock/vendor/etc/init/), only adding the seclabel and library path that
-# recovery needs.  The stock binaries are:
-#   /vendor/bin/qseecomd                                    (stock qseecomd.rc)
-#   /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
-#   /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
-# NOTE: there is no /vendor/bin/keymasterd on this device - that name belongs to
-# other Qualcomm trees and must not be copied in.
-#
-# service vendor.qseecomd /vendor/bin/qseecomd
-#     class core
-#     user root
-#     group root drmrpc
-#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
-#     seclabel u:r:recovery:s0
-#
-# service keymaster-4-0 /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
-#     class hal
-#     user system
-#     group system drmrpc
-#     interface android.hardware.keymaster@4.0::IKeymasterDevice default
-#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
-#     disabled
-#     seclabel u:r:recovery:s0
-#
-# service gatekeeper-1-0 /vendor/bin/hw/android.hardware.gatekeeper@1.0-service-qti
-#     class hal
-#     user system
-#     group system
-#     interface android.hardware.gatekeeper@1.0::IGatekeeper default
-#     setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64:/sbin
-#     disabled
-#     seclabel u:r:recovery:s0
+# TWRP creates the logical vendor mapper before setting
+# twrp.super.symlinks_created. Mount vendor at that point, then start the stock
+# QSEECom and Keymaster 4.0 services. Without them metadataDecrypt() fails and
+# TWRP shows its generic password page even when Android has no screen lock.
+on property:twrp.super.symlinks_created=true
+    mkdir /vendor 0755 root root
+    wait /dev/block/mapper/vendor${ro.boot.slot_suffix}
+    mount ext4 /dev/block/mapper/vendor${ro.boot.slot_suffix} /vendor ro
+    start vendor.qseecomd
+    start keymaster-4-0
+
+service vendor.qseecomd /vendor/bin/qseecomd
+    class core
+    user root
+    group root drmrpc
+    setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64
+    disabled
+    seclabel u:r:recovery:s0
+
+service keymaster-4-0 /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
+    class early_hal
+    user system
+    group system drmrpc
+    interface android.hardware.keymaster@4.0::IKeymasterDevice default
+    setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64
+    disabled
+    seclabel u:r:recovery:s0
