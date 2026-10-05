@@ -96,13 +96,26 @@
     android.system.keystore2-service.xml fragment in that directory is inert for
     exactly that reason.
 
-    NOTE FOR EDITORS: this header is an XML comment, so it may not contain two
-    consecutive hyphens; that is why the section rules above are made of "=" and
-    not of dashes.  Please keep it that way, an expat parse error here would
-    silently take the whole HIDL bring-up down again.
+    NOTE FOR EDITORS: XML forbids two consecutive hyphens inside a comment, which
+    is why the section rules above are made of "=" and not of dashes; please keep
+    it that way.  Being precise about the consequence, because it is easy to
+    overstate: libvintf parses with tinyxml2 (system/libvintf/parse_xml.cpp:32)
+    and tolerant of the sequence, and assemble_vintf accepts such a file, so a
+    dash rule here would NOT have taken the HIDL bring-up down.  It is a
+    well-formedness defect, not a device-blocking one; but expat-based tooling
+    (python xml.etree, xmllint) rejects the document outright, so the regression
+    check keeps it out anyway.
 
     Regression check: tools/verify_decrypt_prereqs.mjs asserts this file exists,
-    parses as XML and carries all four entries.
+    is well-formed, and carries all four entries.  The strongest check available
+    off-device is the platform's own parser:
+        out/host/linux-x86/bin/assemble_vintf -i <this file> -o /tmp/out.xml
+    which exits 0 here and normalises the four entries to
+        android.hidl.manager@1.2::IServiceManager/default
+        android.hidl.token@1.0::ITokenManager/default
+        android.hardware.keymaster@4.0::IKeymasterDevice/default
+        android.hardware.gatekeeper@1.0::IGatekeeper/default
+    all on hwbinder.
 -->
 <manifest version="1.0" type="framework">
     <hal format="hidl">

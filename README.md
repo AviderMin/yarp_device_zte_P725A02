@@ -16,12 +16,12 @@
 | 静态证据核对 | 通过 |
 | 编译验证 | **通过**（`mka recoveryimage` 成功产出 recovery.img） |
 | 镜像结构核对 | **通过**（镜像头、内核、DTB、ramdisk 内容逐项核对） |
-| FBE / metadata 解密 | **支持**（ramdisk 内置 qseecomd/keymaster 4.0/gatekeeper 1.0 + keymaster TA，见「FBE」一节） |
-| 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：已拿到一次实机运行的 `log/`；显示、触摸、logical 分区、`/metadata` 均正常，`/data` 无法挂载（原因见实机检查清单 6a；该次运行的镜像早于本轮解密修复） |
+| FBE / metadata 解密 | **支持，但尚未在修好后的镜像上复验**：ramdisk 内置 qseecomd/keymaster 4.0/gatekeeper 1.0 + keymaster TA；t7 又修掉了两个实测阻断（可执行位、VINTF manifest），见「真机复验（t7）」 |
+| 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：显示、触摸、logical 分区、`/metadata` 均正常；`/data` 仍无法挂载，但 t7 已在真机上把根因定到 "keymaster HAL 从未启动"（不是分区损坏），修复待刷入复验 |
 
 ## 重要风险提示（请先读）
 
-1. **FBE / metadata 解密已编译进来，但尚未在真机上复验。** 本设备 userdata 使用
+1. **FBE / metadata 解密已编译进来，t7 又修掉了两个实测阻断，但都还没在修好后的镜像上复验。** 本设备 userdata 使用
    FBE + ICE + wrappedkey。设备树现在随 recovery ramdisk 一起提供 qseecomd、
    keymaster@4.0、gatekeeper@1.0 及其依赖库（`recovery/root/vendor_ramdisk/`）和
    keymaster TA（`recovery/root/vendor/firmware_mnt/image/`），由
@@ -36,11 +36,17 @@
    设备上，该镜像无法通过厂商签名校验，可能直接拒绝引导；在已解锁设备上可引导，
    但请知悉其签名不具备任何可信度。
 3. **解锁引导器通常要求清空用户数据**，请先自行备份，且本项目**不做任何自动刷写**。
-4. **`/data` 挂载失败属于分区本身的问题，不是本设备树的配置问题，也不要靠格式化来“修”。**
+4. **`/data` 挂载失败，但原因不是分区损坏，更不要靠格式化来"修"。**
    实机 `log/dmesg.txt` 显示内核 F2FS 驱动在 `/dev/block/sda9` 上两个 superblock 的 magic
-   都不等于 `0xf2f52010`；同一时刻其它分区全部正常挂载。也就是说该分区当前不是有效的 F2FS。
-   任何 `recovery.fstab` 选项都改变不了这一点。**不要格式化 userdata / 不要 `make_f2fs` /
-   不要 `fsck -y`**，否则可能毁掉本来可恢复的数据。详细依据见“实机检查清单”第 6a 条。
+   都不等于 `0xf2f52010`；同一时刻其它分区全部正常挂载。
+   **t7 更正**：这**不是**"该分区不是有效的 F2FS"，而是 metadata 加密分区在 dm-default-key
+   尚未建立时的**预期**现象——`/dev/block/sda9` 上本来就不该出现明文 F2FS superblock，
+   必须先由 keymaster 解出 `/metadata/vold/metadata_encryption` 里的 wrapped key 并建立
+   dm-default-key 映射，明文才可见。所以"F2FS magic 不对"和"keymaster 没起来"是同一件事的
+   两个面，后者才是根因（见「真机复验（t7）」）。改 fstab 选项确实改变不了裸块字节，
+   但那是因为解密根本没走到那一步。
+   无论如何都**不要格式化 userdata / 不要 `make_f2fs` / 不要 `fsck -y`**，
+   否则会真的毁掉现在仍可恢复的数据。详细依据见“实机检查清单”第 6a 条。
 
 5. **显示与触摸依赖设备的 dtbo 分区。** 面板与触摸的 overlay 不在本 recovery 镜像内，
    而是由引导器从 `dtbo_a`/`dtbo_b` 分区叠加；因此首次实机验证必须确认显示与触摸，
@@ -418,6 +424,124 @@ qseecomd / keymaster@4.0 / gatekeeper@1.0 与它们的库依赖闭包（含 gate
 `recovery/root/init.recovery.qcom.rc` 中（`on fs` 启动 qseecomd，等
 `vendor.sys.listeners.registered` 后再由属性触发器拉起两个 HAL）。
 
+### 真机复验（t7）：两个让 keymaster 永远起不来的确定性阻断
+
+t7 直接在运行中的 recovery 上取证（`adb shell`，设备 320607233569，活动槽位 `_b`），
+结论是：t4 那轮"把 vendor 加密栈搬进 ramdisk"的方向是对的，但**它从来没有真正跑起来过**。
+实测四个属性：
+
+    init.svc.vendor.qseecomd        = restarting
+    hwservicemanager.disabled       = true
+    hwservicemanager.ready          = (不存在)
+    init.svc.keymaster-4-0          = (不存在，一次启动尝试都没有)
+    init.svc.gatekeeper-1-0         = (不存在，一次启动尝试都没有)
+
+两个原因彼此独立，各自都足以让 `Decrypt_Data()` 拿不到密钥。它们都是构建产物层面的缺陷，
+所以在设备树上改 fstab、改 twrp.flags、改任何运行期选项都碰不到。
+
+#### 阻断 1：ramdisk 里的三个二进制没有可执行位
+
+    $ adb shell ls -l /vendor_ramdisk/bin/ /vendor_ramdisk/bin/hw/
+    -rw-r--r--  qseecomd
+    -rw-r--r--  android.hardware.gatekeeper@1.0-service-qti
+    -rw-r--r--  android.hardware.keymaster@4.0-service-qti
+    $ adb shell getprop init.svc.vendor.qseecomd
+    restarting
+    $ adb shell dmesg | grep -c "cannot execv('/vendor_ramdisk/bin/qseecomd')"
+    46
+
+成因是构建期没有任何东西给这三个文件定过权限位。它们是 `recovery/root/` 下的**普通文件**、
+不是 build module，因此走 `build/make/core/Makefile:2817-2818` 的整目录复制：
+
+    $(foreach item,$(recovery_root_private), cp -rf $(item) $(TARGET_RECOVERY_OUT)/;)
+
+而 `cp` 对**新建**的目标文件采用源文件权限（git 里是 0644），ramdisk 打包器又原样保留——同一
+镜像里 `system/bin/recovery` 是 `0755`，说明打包器并不归一化权限。可以直接在产物里复核：
+
+    $ gzip -dc out/target/product/P725A02/ramdisk-recovery.img | cpio -tvn | grep vendor_ramdisk/bin
+    -rw-r--r--  vendor_ramdisk/bin/qseecomd          # 修之前
+
+修法是用 TWRP 自己也在用的那个钩子（`BoardConfig.mk`）：
+
+    BOARD_RECOVERY_IMAGE_PREPARE += \
+        chmod 0755 $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/qseecomd \
+                   $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti \
+                   $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti;
+
+它在 recovery ramdisk 的 recipe 内部展开（`Makefile:2830`），位置正好在"`recovery/root` 已复制完、
+ramdisk 尚未打包"之间，所以只有这里的 chmod 才真的进得了镜像。必须用 `+=` 而不是 `:=`，
+因为 TWRP 把自己的 depmod 步骤加在同一个变量上（`vendor/twrp/build/tasks/kernel.mk:572`）。
+
+刻意**不**采用"在 git 里把这三个文件标成 100755"的修法：本检出位于 Windows 文件系统，
+可执行位无法表示，下一次 clone 就会把这个修复悄悄丢掉。
+
+#### 阻断 2：ramdisk 里根本没有 VINTF manifest
+
+`system/hwservicemanager/service.cpp:150-160` 的自检：
+
+    auto transport = android::hardware::getTransport(ServiceManager::descriptor, serviceName);
+    if (transport == android::vintf::Transport::EMPTY) {
+        ALOGI("HIDL is not supported on this device so hwservicemanager is not needed");
+        property_set("hwservicemanager.disabled", "true");
+        while (true) { ALOGW("Waiting on init to shut this process down."); sleep(10); }
+    }
+
+`getTransport()`（`system/hwservicemanager/Vintf.cpp:40-71`）先查 framework manifest、再查 device
+manifest，两处都没有就返回 EMPTY。真机表现与代码完全吻合：`hwservicemanager.disabled=true`，
+进程 pid 停在 `__arm64_sys_nanosleep`（就是那个 `sleep(10)` 死循环）。后果是
+`init.recovery.qcom.rc` 里那个
+`on property:...&& property:hwservicemanager.ready=true` **永不成立**，两个 HAL 连 fork 都没有过。
+
+设备侧 `/system/etc/vintf/` 只有一个 AIDL 片段 `manifest/android.system.keystore2-service.xml`，
+而**片段目录只有在主 manifest 解析成功时才会被读**：`system/libvintf/VintfObject.cpp:454-461` 把
+`addDirectoryManifests()` 放在 `fetchOneHalManifest(kSystemManifest)` 返回 OK 的分支里。也就是说
+那个片段一直是死文件，补片段解决不了问题，必须**补主 manifest**。
+
+新增 `recovery/root/system/etc/vintf/manifest.xml`（落地为 ramdisk 里的
+`/system/etc/vintf/manifest.xml`），声明四项：
+
+| 包 | 版本 | 接口 / 实例 | 为什么需要 |
+|---|---|---|---|
+| `android.hidl.manager` | **1.2** | `IServiceManager/default` | hwservicemanager 启动自检，不写它就直接自禁用 |
+| `android.hidl.token` | 1.0 | `ITokenManager/default` | 与平台 `hwservicemanager_no_max.xml` 对齐 |
+| `android.hardware.keymaster` | 4.0 | `IKeymasterDevice/default` | 注册闸门要求 |
+| `android.hardware.gatekeeper` | 1.0 | `IGatekeeper/default` | 注册闸门要求 |
+
+两个容易写错、都已在文件注释里写明：
+
+* **必须是 1.2，写 1.0 无效。** `ServiceManager::descriptor` 取自服务实际实现的生成接口
+  （`system/hwservicemanager/ServiceManager.h` include 的是 `android/hidl/manager/1.2/IServiceManager.h`），
+  查询名就是 `android.hidl.manager@1.2::IServiceManager`；而"声明版本能匹配查询版本"的条件是
+  **声明版本 ≥ 查询版本**（`system/libvintf/include/vintf/Version.h:61-67`，注释里明写
+  `Version(2,1).minorAtLeast(Version(2,2)) == false`）。写成 1.0 的话 hwservicemanager 会继续自禁用。
+* **keymaster / gatekeeper 也必须写。** 注册 HIDL 服务时客户端先查自己的 descriptor 是否被声明为
+  hwbinder，不是就立刻失败：`system/libhidl/transport/ServiceManagement.cpp:988-1001`
+  （`"must be in VINTF manifest in order to register/get."`），而 `PRODUCT_ENFORCE_VINTF_MANIFEST`
+  在 `build/make/core/config.mk:785` 被无条件置为 `.KATI_READONLY` 的 true，没有开关可关。
+  （这三者的 `interfaceChain` 都只有自己 + `android.hidl.base@1.0::IBase`，
+  所以 `ServiceManager::add()` 的"父接口也必须在 manifest 里"检查不会额外要求别的条目。）
+
+四项都放在 **framework** 一份里，而不是按常规拆成 framework + device 两份：常规拆法要求 device
+那份落在 `/vendor/etc/vintf/`，而 `/vendor` 正是 TWRP 会挂上又卸下的地方；hwservicemanager 只在
+启动时读一次并缓存（`system/libvintf/VintfObject.cpp` 的 `Get()`），framework 又先于 device 被查
+（`Vintf.cpp:59` 在 `:64` 之前），所以全部放 `/system`（recovery ramdisk 本体，不会被遮蔽）最稳。
+条目内容逐字取自平台自己的
+`system/hwservicemanager/hwservicemanager_no_max.xml` 与
+`stock/vendor/etc/vintf/manifest.xml:76-94`。
+
+另一个坑：**XML 注释里不能出现连续两个连字符**，否则 expat 会拒绝整个文档。本文件第一版正是
+如此，解析器报 `not well-formed (invalid token): line 5, column 6`；现已由
+`tools/verify_decrypt_prereqs.mjs` 的 `vintf/xml-comment-safety` 与 `vintf/xml-parses` 两项守住。
+
+#### 本轮回归检查
+
+    node tools/verify_decrypt_prereqs.mjs --verbose
+
+新增断言：`vintf/*`（存在、四项内容与版本、type=framework、不放在失效的片段目录、
+注释安全、可被 expat 解析）、`keystore2/*`（触发条件、no_fatal 及其在 early-init、
+平台 service 定义未被改动）、`build/ramdisk-exec-bits` 与 `build/prepare-append`，
+以及在**已构建镜像**上直接读回的 `packed/exec-bits`。
+
 ### keystore2 启动顺序（t4：唯一一次解密尝试的胜负手）
 
 解密只有一次机会：`Decrypt_Data()`（`partitionmanager.cpp:599-651`）在
@@ -442,9 +566,26 @@ Decrypt_Data()
 
 也就是说：**vold 会等 keystore2，但不会等 keymaster HAL**。如果 keystore2 先起来，它在启动
 阶段就因为拿不到 TEE SecurityLevel 而退出，之后每 5 秒被重启一次
-（`system/core/init/service.h:236`），那些失败的查询不会被重试；第四次退出后
-`critical window=0` 会让 init 直接重启到 fatal target（`service.cpp:383-384`）。现象与“设备
-没有密码”完全一致。
+（`system/core/init/service.h:236`），那些失败的查询不会被重试。现象与"设备没有密码"完全一致。
+
+关于重启升级的准确读法（**t7 更正**）：判定是 `if (++crash_count_ > 4)`
+（`system/core/init/service.cpp:366`，`LOG(FATAL)` 在 `:383`），也就是**第 5 次**退出才重启，
+不是第 4 次。而外面那层窗口判断是
+`if (now < time_crashed_ + fatal_crash_window_ || !boot_completed)`（`:365`），
+recovery ramdisk 从不设置 `sys.boot_completed`，所以 `|| !boot_completed` 恒真、窗口形同
+不存在，`critical window=0` 在 recovery 里退化成"任何时刻累计 5 次失败就重启"。
+
+因为 keystore2 的 keymint 查询是一次性的，**第一次启动必然输给这个竞态**（init 置
+`init.svc.keymaster-4-0=running` 只表示 fork 成功，HAL 还要用 QSEECom 载入 trustlet 才会注册），
+所以这条升级路径必须摘掉。本设备树用 init 官方文档给出的开关
+（`system/core/init/README.md:242-243`，判定处 `service.cpp:372`）：
+
+    on early-init
+        setprop init.svc_debug.no_fatal.keystore2 true
+
+放在 `on early-init` 是为了保证它在第一次 `start keystore2` 之前就已经为真。这只去掉重启，
+不会把"keystore2 真的起不来"变成静默挂起：vold 自己的 30 秒轮询
+（`system/vold/Keystore.cpp:112-122`）仍然是等待上限。
 
 因此本设备树把 keystore2 的启动点从平台默认的 `on late-init` 挪到 HAL 之后：
 
