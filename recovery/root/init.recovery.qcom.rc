@@ -34,14 +34,21 @@
 #   system/etc/recovery.fstab   (TARGET_RECOVERY_FSTAB, copied by core/Makefile)
 #   system/etc/twrp.flags       (read as /etc/twrp.flags)
 #   system/etc/ueventd.rc       (first path ueventd parses in recovery mode)
+#   init.recovery.usb.rc        (USB gadget + ADB/MTP triggers; overrides the
+#                                upstream file of the same name at the ramdisk root)
 
 # NOTE on paths: TWRP's own bootable/recovery/etc/init.rc already does
 #   import /init.recovery.${ro.hardware}.rc   (-> this file, ro.hardware=qcom)
 #   symlink /system/etc /etc                  (so /etc/twrp.fstab,
 #                                              /etc/recovery.fstab and
 #                                              /etc/twrp.flags resolve)
-#   import /init.recovery.usb.rc              (generic USB gadget setup)
-# so this device tree neither repeats the symlink nor ships its own USB rc.
+#   import /init.recovery.usb.rc              (USB gadget setup)
+# This device tree DOES override that last file: recovery/root/init.recovery.usb.rc
+# lands at the ramdisk root and replaces upstream's bootable/recovery/etc/
+# init.recovery.usb.rc (verified on device: /init.recovery.usb.rc md5
+# 8bf681c1486ed9c88efd772b66879a14 == the repo file).  The configfs mtp,adb branch
+# that upstream init.rc does not provide lives there - see that file's header.
+# Only the /system/etc -> /etc symlink is not repeated here.
 
 on init
     # The stock recovery ramdisk does exactly this (200).

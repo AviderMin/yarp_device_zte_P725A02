@@ -12,6 +12,18 @@
 #   the stock fstab uses the /dev/block/bootdevice/by-name/<name> symlinks
 #   A/B: slot-selected partitions are <name>_a / <name>_b, hence slotselect
 #
+# ─────────────────────────────────────────────────────────────────────────────
+# 【t5 集成审查】静态复核通过，但**本文件尚未在任何真机镜像上生效**。
+# 运行中的 recovery 镜像早于本文件的全部修复（只读 adb 复验，2026-10-05）：
+#   * /ramdisk-files.sha256sum 里 ./system/etc/recovery.fstab =
+#       bee0320b7bd4f954b0cd1f5eced6cd3ac18ce068a23e1f7f4fcd2ce4f0399b38，与设备上
+#       /etc/recovery.fstab（8340 B）逐字节一致；而修复后本文件的 sha256（当前工作树）不同。
+#   * 运行镜像里 /etc/recovery.fstab 仍定义 /vendor/firmware_mnt（uid=1000,gid=1000）、
+#     /vendor/dsp、/vendor/bt_firmware 三个挂载点——即 R2 迁移尚未生效；
+#     /tmp/recovery.log 也仍在 "Found an additional entry for '/vendor/firmware_mnt'"。
+#   * 结论：R2/B1/B3 与 D2 的注释更正都必须重新构建并刷入 recovery.img 之后才能复核。
+# 因此：本文件的一切结论只能算"静态验证通过"，不得当作"已在真机生效"。
+# ─────────────────────────────────────────────────────────────────────────────
 #<src>                                                  <mnt_point>            <type>  <mnt_flags and options>                 <fs_mgr_flags>
 
 # ---- Logical partitions inside super (slot selected, AVB via vbmeta_system)
@@ -32,14 +44,24 @@
 # 证据（全部可在本仓库或 log/ 内独立复核）：
 #   1. 同一次映射里 system/product/vendor 拿到 dm-4/dm-3/dm-5（log/recovery.txt:36/49/54），
 #      唯独 system_ext_b、odm_b 不存在——同一份 super 元数据不会只缺这两个名字。
-#   2. 原厂 stock/boot/ramdisk/fstab.qcom 与 stock/vendor/etc/fstab.default 都只把
-#      system/product/vendor 标为 logical,first_stage_mount，没有 system_ext、没有 odm。
+#   2. 设备上真正在跑的 fstab（/vendor/etc/fstab.default，本机实测）与仓库留档的
+#      stock/boot/ramdisk/fstab.qcom 都只把 system/product/vendor 标为
+#      logical,first_stage_mount，没有 system_ext、没有 odm 的 logical 行。
 #   3. stock/config/ 只有 system/product/vendor 的 fs_config、file_contexts 与 *_size.txt。
 #   4. odm/system_ext 的内容在父镜像里：stock/vendor/odm/etc/build.prop（ro.odm.*）、
 #      stock/system/system/system_ext/etc/build.prop（ro.system_ext.*，与 system 同为
 #      Android 12 qssi 构建）、以及 stock/system/system_ext 这个符号链接本身。
 #   5. 原厂 stock/product/etc/build.prop:25 的
 #      ro.product.ab_ota_partitions=system,product,vbmeta_system 里也没有这两个名字。
+#
+# B3 更正（措辞，非行为改动）：**不能说"原厂从没写过 odm"**。原厂 recovery 镜像自带的
+# recovery.fstab 第 36 行就有一条 `odm /odm ext4 ro,barrier=1,discard wait,slotselect,avb,
+# logical,first_stage_mount`（证据：stock/recovery/ramdisk/system/etc/recovery.fstab:36，
+# 同文件 :33-35 是 system/product/vendor）。运行期只看得到 3 个逻辑分区，说明 odm 在 super
+# **元数据**里没有启用，但厂商镜像的 fstab 里保留了它的定义。因此本段结论的正确表述是：
+#   "运行期实测 super 只映射出 system/product/vendor 三个逻辑分区；原厂 recovery 镜像的
+#    fstab 里另有 odm 定义，属未启用条目。"
+# （system_ext 则连原厂 fstab 里都没有，两件事不要混为一谈。）
 #
 # 挂载后内容照样可达：/system_root/system/system_ext 与 /vendor/odm，无需单列分区。
 # 回归检查：本文件不得再出现以 system_ext / odm 为 src 的逻辑分区行。
@@ -48,34 +70,56 @@ product                                                 /product               e
 vendor                                                  /vendor                ext4    ro,barrier=1,discard                     wait,slotselect,avb,logical,first_stage_mount
 
 # ---- Metadata (FBE key storage, wrapped keys via keymaster)
+# D2：本行在运行时**不生效**——见下方 "D2 实测结论"。留在这里是为了让静态定义与
+# 原厂 recovery 镜像的 recovery.fstab 保持可比对（gatekeeper/keydirectory 的语义没变）。
 /dev/block/bootdevice/by-name/metadata                      /metadata              ext4    noatime,nosuid,nodev,discard             wait,check,formattable,wrappedkey
 
-# ---- Userdata: FBE + ICE + wrappedkey，逐项与原厂 recovery.fstab 对齐。
-# 与原厂 recovery 镜像自带的 /system/etc/recovery.fstab（同机、已知可用）比对后修正两处偏差：
-#   * 挂载选项不含 inlinecrypt —— 只有原厂 *boot* 的 fstab.qcom 才带它（正常启动时 ICE
-#     密钥已由 keymaster 提供）；recovery 没有 ICE 密钥句柄，不应请求 inline-crypt 语义。
-#   * fs_mgr 标志恢复 sysfs_path=/sys/devices/platform/soc/1d84000.ufshc（UFS 控制器），
-#     原厂 recovery.fstab 正是这么写的（旧注释声称取了该值，但行里没有，属注释与行不符）。
-# 重要限制（不要误判为本次修正能解决）：/data 是 FBE + ICE + wrappedkey，密钥经 keymaster
-# 包在 /metadata/vold/metadata_encryption；本镜像 TW_INCLUDE_CRYPTO := false 且未带
-# qseecom/keymaster 库与服务，因此无法解密，挂载失败属已知限制；任何情况下都不要格式化
-# userdata（唯一能真正修好 /data 的路径是补齐原厂 crypto blobs 并实机验证）。
+# ---- Userdata: FBE + ICE + wrappedkey
 #
-# 实机日志（log/dmesg.txt、log/recovery.txt）证明：/data 的失败发生在比 FBE 更早的一层。
-# 内核 F2FS 驱动在同一块设备上先后探测两个 superblock，两个 magic 都不对：
+# D2 实测结论（本节替代旧的"与原厂 recovery.fstab 逐字节一致"说法，那个说法不成立）：
+#   本行的**挂载选项与 fs_mgr 标志在运行时不会生效**。TWRP 在 recovery 模式下会先解析
+#   /etc/recovery.fstab，再把厂商 fstab 复制成 /etc/additional.fstab 并**只**用它重新
+#   定义 /data 与 /metadata（partitionmanager.cpp:365-380 的 parse_userdata 分支会先
+#   std::erase 掉同名条目再重建；其余行 continue 跳过）。实测证据：
+#     * raw/201-recovery-log.out:89-101：GetFstabPath → /vendor/etc/fstab.default →
+#       "I:Reading /etc/additional.fstab" → 重新 "I:Processing '/metadata' / '/data'"
+#     * raw3/931-additional-fstab.out：/etc/additional.fstab 与 stock/vendor/etc/fstab.default
+#       逐行相同；raw/015-getprop.out：fstab.additional=1
+#     * raw/201-recovery-log.out:835：/data 的最终 Mount_Options =
+#       discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt
+#       —— 与 additional.fstab 的 /data 行逐项吻合；本文件这一行**没有** inlinecrypt，
+#       而且本行带 sysfs_path（TWRP 把它放进 ignored_mount_items，永远不进 Mount_Options），
+#       即最终定义来自厂商 fstab，不来自本文件。
+#
+#   所以对 /data、/metadata 的任何 fstab 改动在真机上都是"只改文档"。要让本文件成为唯一
+#   来源，必须**重新构建**并在 BoardConfig.mk 打开上游开关（属 platform 范围，本次未改）：
+#       TW_SKIP_ADDITIONAL_FSTAB := true
+#   开关位置：vendor/twrp/config/BoardConfigSoong.mk:321 → soong_config_set_bool(...,
+#   skip_additional_fstab, ...)；partitionmanager.cpp:432 有 #ifndef 分支，开启后
+#   fstab.additional=0 且日志会打印 "Skipping Additional Fstab Processing"。
+#   注意副作用：开启后 /data 的 Mount_Options 不再带 inlinecrypt（本行没有它）。
+#   本次刻意**不**把本行改成厂商 fstab 的副本：那会让静态定义与"当前真实运行路径"混在一起，
+#   改动与否都不影响运行期行为，只会掩盖 D2 本身。
+#
+# 重要限制（不要误判为 fstab 能修）：/data 是 FBE + ICE + wrappedkey，密钥经 keymaster 包在
+# /metadata/vold/metadata_encryption；本镜像 TW_INCLUDE_CRYPTO := false 且未带
+# qseecom/keymaster 库与服务，因此不存在可用的解密路径；任何情况下都不要格式化 userdata。
+#
+# 裸块证据的边界（避免过度断言）：内核 F2FS 驱动在同一块设备上先后探测两个 superblock，
+# 两个 magic 都不对：
 #   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0x5243fa92)   # 1st superblock
 #   F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0xc7c8d9ea)   # 2nd superblock
 #   F2FS-fs (sda9): Can't find valid F2FS filesystem in 1th/2th superblock
-# 同一时刻 /metadata(sda6)、persist(sda2)、system/product/vendor 全部正常挂载，说明块设备
-# 与 USB/SELinux 都不是瓶颈；只有 sda9 找不到 F2FS 签名，TWRP 因此报 "Can't probe device
-# /dev/block/sda9" 与 "Failed to mount '/data' (Invalid argument)"。
+# 同一时刻 /metadata(sda6)、persist(sda2)、system/product/vendor 全部正常挂载，说明块设备层
+# 可用；只有 sda9 找不到 F2FS 签名，TWRP 因此报 "Can't probe device /dev/block/sda9" 与
+# "Failed to mount '/data' (Invalid argument)"（raw/201-recovery-log.out:119-133）。
 #
-# 结论：/dev/block/sda9 原始设备上不存在有效的 F2FS superblock。FBE/ICE 只加密文件内容与
-# 文件名，不会让 superblock 变成另一个 magic，所以这**不是**解密缺失导致的失败，也不是
-# 任何 fstab 选项（inlinecrypt / checkpoint / reservedsize / sysfs_path）能修的：
-# 在本文件里加多少个 flag 都改变不了原始设备的字节。
-# 因此本行刻意保持与原厂 recovery 镜像 recovery.fstab **逐字节一致**（已用脚本核对），
-# 不做无依据的选项改动。
+# 能确证的是：/dev/block/sda9 上不存在内核可识别的 ext4/F2FS **明文** superblock
+# （raw2/908-911：前 8 KB 高熵，offset 1024 = 0x5243fa92 ≠ 0xf2f52010，offset 1080 = 0xdc58
+# ≠ 0x53ef）。这一条**不能**推出"分区已损坏"，也**不能**排除 metadata encryption 之类的
+# 整体加密方案（本次未测、也无从在设备上安全验证），更不能推出"所有 fstab 选项都无效"——
+# 能推出的只是：在当前镜像里改 fstab 选项既改变不了裸块字节，也（因为 D2）到不了运行期。
+# 要定性 sda9 的真实格式，需要原厂资料/PC 侧 9008 包比对，属未解决的限制。
 #
 # 处理原则（保护现有数据）：不要格式化 /data，不要 mke2fs/make_f2fs，不要 fsck -y。
 # 现在能做且不做任何写入的取证命令（在 TWRP 的 adb shell 里）：
@@ -90,10 +134,23 @@ vendor                                                  /vendor                e
 # ---- Misc control block
 /dev/block/bootdevice/by-name/misc                          /misc                  emmc    defaults                                 defaults
 
-# ---- Slot-selected firmware partitions (read-only mount, flashable via twrp.flags)
-/dev/block/bootdevice/by-name/modem                         /vendor/firmware_mnt   vfat    ro,shortname=lower,uid=1000,gid=1000,dmask=227,fmask=337 wait,slotselect
-/dev/block/bootdevice/by-name/dsp                           /vendor/dsp            ext4    ro,nosuid,nodev,barrier=1                wait,slotselect
-/dev/block/bootdevice/by-name/bluetooth                     /vendor/bt_firmware    vfat    ro,shortname=lower,uid=1002,gid=3002,dmask=227,fmask=337 wait,slotselect
+# ---- 已删除：/vendor/firmware_mnt、/vendor/dsp、/vendor/bt_firmware（R2 修复）
+# 这三行原先定义在这里，但 TWRP 在解析阶段就把它们丢掉了：Process_Fstab_Line()
+# （partition.cpp:385-389）用 Find_Partition_By_Path(Mount_Point) 判断"附加条目"，而该函数
+# 先过 TWFunc::Get_Root_Path()，只保留路径第一段，于是 "/vendor/firmware_mnt" → "/vendor"
+# 命中已存在的 /vendor（super 逻辑分区），走到 partition.cpp:411-413 把这一行的 fs 标志
+# Save_FS_Flags() 进 /vendor 后 return false，条目被 delete。
+# 实测：raw/201-recovery-log.out:59-64 只有三条 "Found an additional entry for '/vendor/...'"
+# 和随后的 "I:Processing '/vendor/...'"，完整 Partition Logs（:486-870）里没有这三个挂载点。
+# 影响：modem/dsp/bluetooth 三个分区并不是不可访问——twrp.flags 的 /modem、/dsp、
+# /bluetooth 用的是同一批设备节点；上面被丢掉的只是这三个挂载点，外加把 vfat/ext4 的
+# fs 标志混进 /vendor 的 fs 标志集。
+# 处理：移到 twrp.flags，改成一级挂载点并标为 /modem 的子分区（见该文件的 "固件分区（R2 修复）"）。
+# B1 补充（在 twrp.flags 侧完成）：原厂在这三个挂载点上声明的 ro / context= 等属性
+# 不能丢，已用 twrp.flags 的 fsflags= 恢复（原厂值见
+# stock/recovery/ramdisk/system/etc/recovery.fstab:40-42）。本文件不再承担这三个挂载点，
+# 因此这里也不重复写 mount 选项。
+# 回归检查：本文件不得再出现 /vendor/firmware_mnt、/vendor/dsp、/vendor/bt_firmware。
 
 # ---- Log storage
 /dev/block/bootdevice/by-name/logdump                       /logdump               ext4    noatime,nosuid,nodev,barrier=1,discard   wait,formattable

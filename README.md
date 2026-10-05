@@ -48,6 +48,7 @@
 | AOSP 基线 | `android-16.0.0_r1` |
 | TWRP 版本串 | `3.7.1_16`（`bootable/recovery/variables.h:20` 的 `TW_MAIN_VERSION_STR`） |
 | 本设备树验证基线 | 提交 `dce3d21d3f183ae08ac821c94fbfff679731ed5c`（下表 `recovery.img` 哈希即对应此版本；构建时间 2026-10-04T23:54+08:00）。任何后续改动都必须重新构建并再次独立复验 |
+| **真机当前运行的镜像** | 构建时间 **2026-10-05 10:38:19 CST**、指纹 `ZTE/twrp_P725A02/P725A02:99.87.36/BP2A.250605.031.A2/eng.avider:eng/test-keys`、`ro.twrp.version=3.7.1_16-0`，其 ramdisk 配置与提交 `4585a19` 的检出**逐字节相同**，**早于 t1–t4 的全部修复**（复验见「集成审查」一节）。因此下表任何镜像哈希都不再对应插着 USB 的这一台 |
 | 可用 release 配置 | `bp2a`（另有 ap2a / ap3a / ap4a / bp1a），位于 `build/release/release_configs/` |
 
 编译验证与复验均在真实检出 `~/workdir/TWRP-Test` 上完成，**未对上游 TWRP 源码做任何修改**。
@@ -188,7 +189,9 @@ unknown flag: optional`，数量与这两条一致。
 | 原厂 recovery.fstab 挂载点 | 本项目位置 |
 |---|---|
 | `/system` `/product` `/vendor` `/metadata` `/data` `/mnt/vendor/persist` `/misc` `/vendor/firmware_mnt` `/vendor/dsp` `/vendor/bt_firmware` | `recovery/root/system/etc/recovery.fstab` |
-| `/boot` `/recovery` `/apdp` `/persistent`(frp) `/msadp` `/ztecfg` | `recovery/root/system/etc/twrp.flags` |
+| `/boot` `/recovery` `/apdp` `/persistent`(frp) `/ztecfg` `/modem` `/dsp` `/bluetooth` | `recovery/root/system/etc/twrp.flags` |
+| ~~`/msadp`~~ | **不写入**：本机 GPT 里没有 msadp（`ls /dev/block/by-name/msadp` → ENOENT；`raw4/941-msadp-node.out`），原条目已删 |
+| `/vendor/firmware_mnt` `/vendor/dsp` `/vendor/bt_firmware` | **不在** `recovery.fstab`：三段式挂载点会被 TWRP 折叠进 `/vendor` 并丢弃（R2），现以一级挂载点 `/firmware_mnt` `/dsp_firmware` `/bt_firmware` 写在 `twrp.flags` 并标为 `/modem` 子分区（B1 用 `fsflags=` 恢复原厂的 `ro`/`context=`） |
 | `/sdcard` `/storage/sdcard1` `/storage/usbotg` | `twrp.flags` 中的 `/sdcard1`、`/usb_otg`（TWRP 采用自身可移动存储处理，不用 voldmanaged 通配符） |
 | —（本项目新增） | `recovery.fstab` 的 `/logdump` |
 | `/odm`（原厂 fstab 列出，但本机 super 里没有该分区） | **不写入** `recovery.fstab`：odm 的内容在 vendor 镜像的 `/vendor/odm`，由 `/vendor` 条目覆盖；原厂 fstab 里根本没有 `/system_ext`，system_ext 的内容在 system 镜像的 `/system/system_ext`（依据见「super 的实际内容」） |
@@ -233,12 +236,111 @@ recovery fstab 中；`[待确认]` 表示仅见于原厂 recovery fstab（未出
    即 t5 整合后的设备树版本；任何后续改动（包括仅修改 ramdisk 内的配置文件）都会改变该哈希，
    必须重新构建并发起独立复验。
 2. 该镜像另经独立复验：AVBf 页脚存在（`orig_image_size` = 76099584，0x04893000），
-   内部 AVB0 vbmeta 为 1664 字节；ramdisk 内 4 个设备文件的哈希与工作区源文件逐项一致
+   内部 AVB0 vbmeta 为 1664 字节；它的 ramdisk 内 4 个设备文件哈希与**当时的**工作区源文件逐项一致
    （`recovery.fstab` `bb4d6872…`、`twrp.flags` `00190f77…`、`ueventd.rc` `86c2edee…`、
    `init.recovery.qcom.rc` `a3656f7a…`）。
+   > ⚠️ 这 4 个哈希**已经过期**：t5 集成审查又改动了设备树里的注释与一处错误结论
+   > （见下节「集成审查」），所以它们既不等于当前工作区文件，也不等于任何一台真机上的镜像，
+   > 仅作历史备案。**当前**工作区 4 个文件的 sha256 列在「集成审查」一节。
 3. 早前一次构建（t4 阶段，设备树为 t5 整合前的版本）产出的哈希为
    `84c6ef39bc43c3a7253baf2d55dcbb229e290926b6c91210379ae98a5f0dbdd3`，
    **已被 t5 整合取代，不是最终产物**，仅在此备案以免混淆。
+
+## 集成审查（t5）：逐项状态与"为什么有些项只能在刷机后验证"
+
+本节是 t1–t4 全部改动的一轮集成审查结论（只读 adb 复验 + 上游源码只读核对；
+**未构建、未刷写、未重启、未改 twrp16 源码**）。目的是让后续维护者一眼分清
+"已经修好"、"只在静态层面修好"、"根本没修"三类状态。
+
+### 1. 运行的镜像早于本设备树（这是所有动态验证的共同前提）
+
+用只读 adb 复验（设备仍在 recovery，uptime ≈ 49 min，与 t1 会话那次启动不是同一次）：
+
+| 项目 | 实测值 |
+|---|---|
+| 版本 / 指纹 | `3.7.1_16-0` / `ZTE/twrp_P725A02/P725A02:99.87.36/BP2A.250605.031.A2/eng.avider:eng/test-keys` |
+| `ro.build.date` | `Mon Oct  5 10:38:19 CST 2026` |
+| `/etc/recovery.fstab` | 8340 B，sha256 `bee0320b…9b38`（= `/ramdisk-files.sha256sum` 的记录） |
+| `/etc/twrp.flags` | 4674 B，sha256 `48b6c779…8b4a` |
+| `/init.recovery.usb.rc` | 8325 B，sha256 `5f60aed8…f01e` |
+| `/init.recovery.qcom.rc` | 6377 B，sha256 `a3656f7a…b983` |
+
+这 4 个文件与提交 `4585a19` 的那份检出**逐字节相同**，而那份检出里
+**没有** `/modem`、`/usb_otg`，**有** `/msadp` 与 `display="VBMeta System"`（带空格），
+`recovery.fstab` 里也**还有** `/vendor/firmware_mnt|/vendor/dsp|/vendor/bt_firmware` 三个三段式挂载点。
+运行中的 `/tmp/recovery.log` 同样仍在打印 `I:Processing '/msadp'` 与
+`I:Found an additional entry for '/vendor/firmware_mnt'`。**结论：t1–t4 的 storage 类修复尚未生效。**
+
+### 2. 当前工作区 4 个文件的 sha256（本轮审查后的值）
+
+| 文件 | sha256 |
+|---|---|
+| `recovery/root/system/etc/recovery.fstab` | `d2c82b7999301b4efa345865d4af289c89a3b2bf287c36e5ea8107c73ee38011` |
+| `recovery/root/system/etc/twrp.flags` | `f189cf35b9dcd60fa2c2d8917440eb8c539ff8853339e8e706e048e0141a7164` |
+| `recovery/root/init.recovery.usb.rc` | `4118f4e1bf212835793cac47d3e7f7f56fa741d2d7c9f11ff942a4504e596571` |
+| `recovery/root/init.recovery.qcom.rc` | `c5b8c90b0be3d27f5f77bbd09b2c4cc65cffc98f432bc6b50cccfeb7e7e6fa25` |
+
+### 3. 逐项状态
+
+| 项 | 内容 | 状态 | 为什么 |
+|---|---|---|---|
+| t4-1 | `BoardConfig.mk` 删除死变量 `TARGET_RECOVERY_DEFAULT_REFRESH_RATE` | **已核验** | 对 TWRP 16 检出全量 grep，唯一命中就是本设备树，上游 0 处 ⇒ 该变量没有任何消费者 |
+| t4-2 | 显示 1080×2460 / `XBGR8888` / density 480 / 触摸 `goodix_ts` / 按键 / 振动 / 背光 | **已实机核验** | recovery.log 的 `width: 1080, height: 2460`、`b1 f1`… 等行与只读 sysfs 读数一致（细节见 BoardConfig.mk 注释） |
+| t2-B1 | `/firmware_mnt`、`/dsp_firmware`、`/bt_firmware` 用 `fsflags=` 恢复原厂 `ro`/uid/gid/dmask/fmask/`context=` | **静态核验**<br>（字段逐字取自原厂 recovery 镜像 fstab） | `fsflags=` 确实是上游 `tw_flags` 里的标志、`mountoptions=` 不存在；`mount_flags[]` 里 `ro` 会置 `Mount_Read_Only`，其余 token 原样进 `Mount_Options` ⇒ 会走到 `mount(2)`。当前镜像里这三行还不存在，无法动态确认 |
+| t2-C2 | `display="..."` 里的空格会截断 flags 字段（7 条受影响），显示名改成单 token | **静态核验** | 已按上游 `parse_twrp_flags` 的分词逻辑独立重实现并复算：修复前那 7 条的 `backup=1;flashimg=1;subpartitionof=…` 确实被丢弃，修复后全部保留 |
+| t3-D1 | `mtp,adb` 的 configfs 绑定改成 AOSP `mtp_adb` 写法 + `idProduct 0x4EE2` | **待刷机验证** | 与 AOSP 16 `system/core/rootdir/init.usb.configfs.rc:35-40` 逐字同构，也与原厂 `stock/system/system/etc/init/hw/init.usb.configfs.rc` 被注释掉的同一块一致；但当前镜像的 configfs 仍是 `f1 -> ffs.adb` + `configuration "adb"` + `idProduct 0xd001`，改好的分支从未在真机上执行过 |
+| t3-D1 回退 | 关掉 MTP 走 `none` 分支后仍应只剩 ADB | **设计上安全，未动态验证** | 回退路径只依赖 `sys.usb.ffs.ready`（由 adbd 设置），与 MTP 是否就绪完全无关；唯一新增写入是 `mtp.gs0 -> b.1/f1`，内核若拒绝绑定则那一次 UDC 写入失败，重启 recovery 必回到仅 ADB |
+| t2-D2 | 厂商 fstab（`/etc/additional.fstab`）会覆盖 `/data`、`/metadata` 的定义 | **证据充分，但本轮刻意不改** | 上游 `partitionmanager.cpp` 的 `parse_userdata` 分支只吃这两条；运行日志 `fstab.additional=1`、`Reading /etc/additional.fstab`、`/data` 的最终 `Mount_Options` 与厂商 fstab 逐项吻合。真正"修"它要在 `BoardConfig.mk` 打开 `TW_SKIP_ADDITIONAL_FSTAB` ⇒ 属平台范围，见下节 |
+| t2-B2 | `/sdcard1`、`/usb_otg` 的 `auto` 设备字段 | **未修复，已定性** | 见下节 |
+| t1-D1 | 删除 `/msadp` 幽灵条目 | **已核验（分区表层面）** | 设备 by-name 里没有 msadp；运行镜像里它仍是 0 B 幽灵项，删掉后不会再出现 |
+| t1-R2 | 三个三段式挂载点迁移到 twrp.flags 一级挂载点 | **静态核验** | 三个新挂载点过 `Get_Root_Path()` 后保持不变，不再被折叠进 `/vendor`；当前镜像里仍是被丢弃的老写法 |
+
+### 4. 三个"不能靠改设备树解决"的问题（本轮没有假装修好）
+
+**D2 —— `/data`、`/metadata` 的运行期定义来自厂商 fstab。**
+上游证据：`bootable/recovery/partitionmanager.cpp` 的 `#ifndef TW_SKIP_ADDITIONAL_FSTAB` 分支在
+recovery 模式下把厂商 fstab 复制成 `/etc/additional.fstab`，接下来的那一轮
+`parse_userdata` 只会 `std::erase` + 重建 `/data` 与 `/metadata`，其余行 `continue`；
+开关映射在 `vendor/twrp/config/BoardConfigSoong.mk:321` → `soong_config_set_bool(..., skip_additional_fstab, …)`。
+**本轮不建议打开它**，三条理由：(a) 打开后本树的 `/data` 行没有 `inlinecrypt`，会真实改变挂载选项，
+而 `/data` 当前因 sda9 没有可识别的 F2FS/明文 superblock 根本挂不上，打开它并不能让 `/data` 可用；
+(b) 那会改 `BoardConfig.mk`（平台范围），且必须重新构建才能验证；(c) 属"要不要做"的决策，
+不是集成审查该替队长做的决定。**结论：证据充分、但决定权不在本任务，且不改。**
+
+**B2 —— `auto` 不是通配符。**
+上游证据：`partition.cpp` 里 `auto` 只在 `Classify_By_Mount_Point()` 当**挂载点**用时被改写；
+块设备通配符只有两条路 —— `/devices/…` 行（本文件写不出来：行首字段会被当挂载点）或设备字段含 `*`
+（`Apply_Block_Device_Attributes()` → `Wildcard_Block_Device` → `Find_Wildcard_Block_Devices()`）。
+`auto` 两条都不满足，所以它一直是字面串。实机证据：`/sdcard1` 与 `/usb_otg` 在日志里都是
+`Size: 0 B`、`Flags` 里没有 `IsPresent`、`Primary_Block_Device: auto`，并有
+`Unable to mount '/sdcard1'` / `'/usb_otg'`。卡其实在位（`/dev/block/mmcblk0p1` 可读，FAT32）。
+**结论：B2 仍未解决。** 本轮只更正了设备树里那条**错误结论**（原先写"auto 通配符由 TWRP 自己去扫块设备"），
+没有改行为 —— 换一条同样无法在刷机前验证的写法，只会把"已知未解"变成"未知未解"。
+刷机后的复核要看 `/tmp/recovery.log` 里 `/sdcard1` 的 `Primary_Block_Device` 与 `mount | grep sdcard1`。
+
+**MTP 端到端 —— 只有内核侧条件被证明，用户可见效果未知。**
+已被只读探针证明的：`/config/usb_gadget` 存在（configfs 可写）、`functions/mtp.gs0` 可创建、
+`/dev/mtp_usb` 存在且为 `crw-rw---- root mtp`、内核 f_mtp 在运行镜像里**真的被调用过**
+（`dmesg` 有 `mtp_open` / `mtp_release`），TWRP 的 sepolicy 把 `recovery`、`init`、`adbd` 设为
+`permissive`（`system/sepolicy/private/twrp.te`），所以 `/dev/mtp_usb` 上的 `avc denied` 不会变成
+读写失败。**没有**被证明的：主机（Windows）是否真的识别出"便携设备"、能不能传文件 ——
+这必须在刷入新 `recovery.img` 后看主机端。因此本节不声称"MTP 已修复"。
+
+### 5. 本轮（t5）对设备树做的改动
+
+只动注释与一处**错误结论**，**任何一行的行为字段都没变**（分区条目、flags、rc 命令逐字不变，
+已由 `tools/check_fstab_static.mjs` 与 `log/session-20261005-2150/scripts/t2-storage-conformance.mjs`
+在改动后重跑确认，两者仍全量 PASS）：
+
+* `recovery/root/system/etc/twrp.flags`：更正"auto 通配符"的错误机理（上文 B2），并在文件头加一段
+  "运行镜像早于本文件"的复验注记。
+* `recovery/root/system/etc/recovery.fstab`：在文件头加同一段复验注记（R2/B3/D2 同样只能在刷机后复核）。
+* `README.md`：更正"ADB / MTP 可用"的过时表述、补上真机镜像基线与 R2 迁移后的分区归属表、加上本节。
+
+`stock/**`、`log/**`、`tools/**` 与 twrp16 源码**在本轮中均未被修改**
+（`stock` 最新 mtime 为 2026-10-05 00:30:29，`tools` 为 11:58:40；`log` 下只有各任务自己的
+只读采集与报告文件，非本轮改动）。工作区里另有 4 个未跟踪的临时文件（`.t3-bootusb-report.md`、
+`.t6run2.ps1`、`.t6run3.ps1`、`.t6run4.ps1`），属构建/验证会话的残留，保持未跟踪。
 
 ## 构建步骤
 
@@ -423,9 +525,15 @@ grep -nE '^(TARGET_COPY_OUT_(PRODUCT|ODM)|BOARD_(SUPER|RECOVERYIMAGE)_PARTITION_
 
 ## 实机日志中可忽略项与已定性项（内核 / 触屏 / 格式）
 
-本节把一次实机 recovery 运行（`log/dmesg.txt`、`log/fastbootd/dmesg.txt`、`log/recovery.txt`）里
-除 `/data` 之外的报错逐条定性，避免后续重复调查。结论：**只有 `/data`（sda9）是真故障**（见上文 6a），
-其余三条都不是本设备树能修、也不需要修的问题；其中触屏实测工作正常。
+本节把实机 recovery 运行的日志逐条定性，避免后续重复调查。**只有 `/data`（sda9）是真故障**（见上文 6a），
+其余各项都不是本设备树能修、也不需要修的问题；其中触屏实测工作正常。
+
+> 日志已更新一次：当前 `log/` 下是 `dmesg.txt` 与 `recovery.log`（旧文件名 `recovery.txt`、
+> `fastbootd/dmesg.txt` 已被替换）。已对**新老两套日志**各复核一遍：下列各项（含 sda9 superblock
+> magic、QG `%)`、`DM_DEV_STATUS`、Goodix 配置/固件缺失与 sensor id mismatch、触屏事件）
+> 全部**逐字复现**，仅时间戳与本次点按次数不同；因此定性结论不变。新日志对应一次更新的构建
+> （其属性为 `ro.odm.build.date=Mon Oct  5 10:38:19 CST 2026`，早前一份是 01:18:55），
+> 但 `/data` 行为与其它现象完全相同。
 
 ### 1. Goodix 触屏 “cfg bin / 固件缺失 + sensor id mismatch” —— 噪声，且触摸可用
 
@@ -505,6 +613,41 @@ init: DM_DEV_STATUS failed for product_b: No such device or address
 | Goodix cfg/固件缺失 + sensor id mismatch | 恢复环境固有噪声，触摸实测正常 | 否（bin 不在仓库，原厂 recovery 同样没有） |
 | `unsupported %) in format string` + WARNING | 原厂内核 printk 缺陷，无功能影响 | 否（不编译内核） |
 | `DM_DEV_STATUS failed for system_ext_b/product_b` | recovery 模式预期输出 | 否（无需修） |
+| USB-PD `send hard reset` ×3 → `disabling PD` | 电源协商降级为 SDP，充电与 USB 功能均正常 | 否（内核 PD 驱动，非设备树） |
+
+### 4. USB-PD 连续三次 hard reset 后自行关闭 PD —— 噪声，不影响用户需求
+
+```
+usbpd usbpd0: Type-C Source (default) connected
+usbpd usbpd0: SNK_Startup -> SNK_Wait_for_Capabilities  (delay 500ms)
+usbpd usbpd0: SNK_Wait_for_Capabilities -> SNK_Hard_Reset
+usbpd usbpd0: send hard reset
+usbpd usbpd0: SNK_Hard_Reset -> SNK_Transition_to_default (delay 685ms)
+... 重复 3 次（t=1.57s / 2.76s / 3.95s）...
+usbpd usbpd0: Sink hard reset count exceeded, disabling PD
+pm7250b_charger: smblib_set_prop_pd_active: pd_active:0
+pm7250b_charger: smblib_update_usb_type: APSD=SDP PD=0, real_charger_type=4
+```
+
+**它是否影响用户需求：不影响。** 依据：
+
+* **不是崩溃、与挂载无关**：PD 协商完全发生在前 5.13 s 的启动早期，与 TWRP 挂载各分区、
+  读写 storage 的时段不重叠；全程 `Kernel panic` / oops 为 0（唯一 WARNING 是上面第 2 条的 QG）。
+* **自愈且降级到这个充电器本来就支持的模式**：三次重试后内核主动放弃 PD（`Sink hard reset count
+  exceeded, disabling PD`），回落到 `APSD=SDP PD=0` 的 SDP 模式，充电**照常进行**：禁用后仍有
+  6 次电流设置、最后一条为 `usb suspend:0`，全程 USB 挂起事件 0 次（即没有被挂起）。
+* **USB 门控没有被 PD 影响**：`configfs-gadget gadget: super-speed config #1`（dmesg 2.447 s）、
+  `USB_STATE=CONFIGURED`（2.447 s）都发生在 PD 被禁用之后，说明 USB 枚举走的是电源协商之外的路径。
+  > ⚠️ 更正（t5 集成审查）：此处原先写“ADB / MTP 可用”**与实测不符**。当时设备实测
+  > **ADB 可用、MTP 不可用**（configfs 只有 `f1 -> ffs.adb`、`configuration "adb"`、`idProduct 0xd001`；
+  > `/dev/usb-ffs/mtp` 不存在）。dmesg 里的 `mtp_open` 只说明 TWRP 打开了内核 f_mtp 节点
+  > `/dev/mtp_usb`，不能推出主机侧 MTP 可用。MTP 的修复（`init.recovery.usb.rc` 的 `mtp_adb` 分支）
+  > 尚未在任何镜像上生效，见「集成审查」一节。
+* **唯一实际后果**：无法用 PD 高压快充，只按 5V/900mA 充。这只会让**充电变慢**，
+  不会中断操作、不会丢数据，也不影响刷写/备份；需要长时供电时应插更强的充电器或留意电量。
+* **成因与归属**：这是 Type-C 对端（充电器/线材）在该时序下未按 PD 规范回应 capabilities 的
+  常见现象，内核按规范重试后自行降级；`usbpd`/`pm7250b_charger` 都是内核内建驱动，
+  本项目不编译内核、设备树也无任何 PD 相关配置，因此**无本项目可修点**。
 
 ## 刷写说明（仅供参考，本项目从不自动刷机）
 

@@ -1,8 +1,39 @@
 # TWRP 额外分区表，用于中兴 P725A02。
 #
+# ─────────────────────────────────────────────────────────────────────────────
+# 【t5 集成审查】静态复核通过，但**本文件尚未在任何真机镜像上生效**。
+# 运行中的 recovery 镜像早于本文件的全部修复（只读 adb 复验，2026-10-05）：
+#   * /ramdisk-files.sha256sum 里 ./system/etc/twrp.flags =
+#       48b6c7798337c419028188187e6e5b2f778f5942f0e01428a612bffeeaac8b4a，与设备上
+#       /etc/twrp.flags（4674 B）逐字节一致；而修复后本文件的 sha256（当前工作树）不同。
+#   * 运行镜像里 /etc/twrp.flags 仍有 /msadp、display="VBMeta System"、display="Modem ST1"、
+#     没有 /modem 与 /usb_otg；/etc/recovery.fstab 仍是 /vendor/firmware_mnt|/vendor/dsp|
+#     /vendor/bt_firmware 三个挂载点，且 /vendor/firmware_mnt 写的是 uid=1000。
+#   * 结论：B1（fsflags）、C2（display 单 token）、被删的 /msadp 等改动，
+#     都必须重新构建并刷入 recovery.img 之后才能在真机上复核。
+# 因此：本文件的一切结论只能算"静态验证通过"，不得当作"已在真机生效"。
+# ─────────────────────────────────────────────────────────────────────────────
 # TWRP 以 /etc/twrp.flags 读取本文件（bootable/recovery/partitionmanager.cpp 的
-# parse_twrp_flags），并按挂载点与 recovery.fstab 中的条目对应。
-# 每行格式： <挂载点> <文件系统> <设备> [设备2] flags=...
+# TWPartitionManager::Process_Fstab() 里 "Reading /etc/twrp.flags" 那一段），
+# 按挂载点与 recovery.fstab 中的条目对应；recovery.fstab 里没有的挂载点会在
+# 之后以 "Processing remaining twrp.flags" 补进来。
+# 每行格式： <挂载点> <文件系统> <设备> [设备2=备用块设备] flags=...
+#   解析细则（同一段代码，务必按此写）——字段按空白切分后：
+#     第 1 个字段 = 挂载点（行首不是 '/' 时布局会变，本文件一律以 '/' 开头）
+#     第 2 个字段 = 文件系统；第 3 个字段 = 主块设备
+#     第 4 个字段 = 备用块设备，**只有以 '/' 开头才会被收下**，其它内容整段忽略
+#     含 flags= 的那一个字段 = TWRP 标志串（以 ';' 分隔），找到它就不再往后扫
+#   → 所以这里**没有** Android fstab 那种独立的 mount 选项列；挂载选项只能通过
+#     第 5 列 flags= 里的 fsflags= 传（见下方 "B1 修复" 一节）。
+#   ⚠️ 这一段扫描**不认双引号**：它先把整行所有 <= 32 的字节都清成 '\0'，再按字段切。
+#     也就是说 display="..." / backupname="..." 里**不能有空格**——空格会提前结束 flags 字段，
+#     该字段后面的一切（backup=1;flashimg=1;subpartitionof=...;fsflags=...）会被静默丢弃。
+#     （对比：TWPartition::Process_Fstab_Line() 处理 recovery.fstab 时是引号感知的，只有本文件不是。）
+#     实测教训：本文件原先有 7 条 display 带空格（VBMeta System / Persistent (frp) /
+#     Modem ST1 / Modem ST2 / Modem Firmware (firmware_mnt) / DSP Firmware / BT Firmware），
+#     复原解析器后可以看到它们的 flags 字段分别只剩 1~2 个 token，即 backup/flashimg/
+#     subpartitionof 从未生效（TWRP 备份列表里这些分区实际不可勾选）。现已全部改成单 token。
+#     回归检查：本文件任何一个有效行都不得出现 " 之间的空格；有效行字段数不得超过 5。
 #
 # 分区名与镜像尺寸来自原厂 9008 救砖包分区表（stock/rawprogram4.xml）：
 #   boot_a/boot_b         24576 x 4096 = 100663296
@@ -23,7 +54,13 @@
 #   [已证实] 名称出现在 stock/rawprogram4.xml，且/或出现在原厂 recovery
 #            镜像自带的 system/etc/recovery.fstab 条目中。
 #   [待确认] 只在原厂 recovery.fstab 中出现（未在本仓库的 XML 分区表中出现）；
-#            在真机上若节点不存在，TWRP 只会忽略该条目，但请勿在未确认前用它刷写。
+#            必须在真机上先确认 /dev/block/by-name/<名称> 存在，否则不要用。
+#   每个条目都会先与 log/session-20261005-110836/derived/partition-coverage.txt
+#   或 log/session-20261005-2150/raw 里的 by-name 列表
+#   （实机 99 个 /dev/block/by-name 条目 + 88 个 bootdevice/by-name 条目）核对；
+#   节点确实不存在的条目一律删除，不留在文件里当幽灵项。
+#   现状：本文件所有条目的 by-name 节点都已在实机上确认存在（0 个幽灵项）；
+#   最后一个是 /msadp，已在下方 D1 一节记录并删除。
 
 # 挂载点             文件系统  设备                              设备2   flags
 # ---------------------------------------------------------------- [已证实]
@@ -31,7 +68,7 @@
 /recovery            emmc    /dev/block/by-name/recovery                 flags=slotselect;display="Recovery";backup=1;flashimg=1
 /dtbo                emmc    /dev/block/by-name/dtbo                     flags=slotselect;display="DTBO";backup=1;flashimg=1
 /vbmeta              emmc    /dev/block/by-name/vbmeta                   flags=slotselect;display="VBMeta";backup=1;flashimg=1
-/vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta System";backup=1;flashimg=1
+/vbmeta_system       emmc    /dev/block/by-name/vbmeta_system            flags=slotselect;display="VBMeta_System";backup=1;flashimg=1
 /apdp                emmc    /dev/block/by-name/apdp                     flags=display="APDP";backup=1;flashimg=1
 
 # ---------------------------------------------------------------- [已证实]
@@ -40,18 +77,127 @@
 /dsp                 emmc    /dev/block/by-name/dsp                      flags=slotselect;backup=1;subpartitionof=/modem
 /bluetooth           emmc    /dev/block/by-name/bluetooth                flags=slotselect;backup=1;subpartitionof=/modem
 
-# ---------------------------------------------------------------- [待确认]
-# 以下名称来自原厂 recovery 镜像自带的 fstab（/persistent→frp、/msadp、/ztecfg、
-# 以及高通惯用的 modemst1/modemst2/fsg/fsc），本仓库的 XML 分区表中没有出现，
-# 因此未经真机确认前不要用它们刷写；节点不存在时 TWRP 会直接忽略。
-/persistent          emmc    /dev/block/by-name/frp                      flags=display="Persistent (frp)";backup=1;flashimg=1
-/msadp               emmc    /dev/block/by-name/msadp                     flags=display="MSADP";backup=1;flashimg=1
+# ---------------------------------------------------------------- [待确认 → 已实机核对]
+# 以下名称来自原厂 recovery 镜像自带的 fstab（/persistent→frp、/ztecfg，以及高通惯用的
+# modemst1/modemst2/fsg/fsc）。实机核对结果（log/session-20261005-110836）：
+#   frp(sda5)、ztecfg(sdf6)、fsg(sdf4)、fsc(sdf5)、modemst1(sdf2)、modemst2(sdf3)
+#   六个节点的 by-name 链接都存在，可以保留。
+#
+# D1（已修）：原 /msadp 行已删除——本机 GPT 里没有 msadp，它只是一个幽灵条目。
+#   证据：
+#     * raw4/941-msadp-node.out：ls /dev/block/by-name/msadp → No such file or directory
+#     * derived/partition-coverage.txt：全表交叉核对后，"被引用但设备上不存在"的节点只有 msadp
+#     * raw/100-proc-partitions.out：sda1..9 / sdb1..2 / sdc1..2 / sdd1..3 / sde1..63 / sdf1..6
+#       编号连续无空洞，GPT 里没有被隐藏的未命名分区
+#     * raw/201-recovery-log.out:701-712：/msadp | | Size: 0 B，Flags 里没有 IsPresent
+#   它只会让分区列表持续出现一个 0 B 幽灵项（名称来源：原厂 recovery 镜像的
+#   system/etc/recovery.fstab 与 vendor_file_contexts，那只说明原厂通用配置里有它，
+#   不说明本机有）。回归检查：本文件不得再出现 /dev/block/by-name/msadp。
+/persistent          emmc    /dev/block/by-name/frp                      flags=display="Persistent_frp";backup=1;flashimg=1
 /ztecfg              emmc    /dev/block/by-name/ztecfg                    flags=display="ZTECFG";backup=1;flashimg=1
 /fsg                 emmc    /dev/block/by-name/fsg                      flags=display="FSG";backup=1;flashimg=1
 /fsc                 emmc    /dev/block/by-name/fsc                      flags=display="FSC";backup=1;flashimg=1
-/modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem ST1";backup=1;flashimg=1
-/modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem ST2";backup=1;flashimg=1
+/modemst1            emmc    /dev/block/by-name/modemst1                 flags=display="Modem_ST1";backup=1;flashimg=1
+/modemst2            emmc    /dev/block/by-name/modemst2                 flags=display="Modem_ST2";backup=1;flashimg=1
 
-# 可移动存储（原厂 recovery.fstab 用 voldmanaged 设备通配符；TWRP 侧用 auto 更稳）
+# ---------------------------------------------------------------- 固件分区（R2 修复）
+# 原先这三条写在 recovery.fstab 里，挂载点分别是 /vendor/firmware_mnt、/vendor/dsp、
+# /vendor/bt_firmware。它们**在运行时被 TWRP 丢弃**，从来没有进入分区表：
+#   raw/201-recovery-log.out:59-64 只有 "Found an additional entry for '/vendor/firmware_mnt'"
+#   / '/vendor/dsp' / '/vendor/bt_firmware' 三行，而完整的 Partition Logs（:486-870）
+#   里根本找不到这三个挂载点。
+#
+# 机理（bootable/recovery，只读参考）：TWPartition::Process_Fstab_Line() 在
+# partition.cpp:385-389 用 PartitionManager.Find_Partition_By_Path(Mount_Point) 判断
+# "附加条目"，而 Find_Partition_By_Path（partitionmanager.cpp:836-847）会先过
+# TWFunc::Get_Root_Path()（twrp-functions.cpp:371-384）——该函数只保留路径的第一段，
+# "/vendor/firmware_mnt" 被截成 "/vendor"，于是命中已经存在的 /vendor（super 逻辑分区），
+# 走到 partition.cpp:411-413：把这一行的 fs 标志 Save_FS_Flags() 塞进 /vendor 后 return false，
+# 条目被 delete。任何三段式挂载点（/a/b/c 形式）在这个 TWRP 上都会被同样处理。
+#
+# 因此把三条改成**一级挂载点**（"/firmware_mnt" 过 Get_Root_Path 后仍是 "/firmware_mnt"），
+# 并像 /dsp、/bluetooth 那样标成 /modem 的子分区：modem 固件族在备份/恢复里一起处理，
+# 不会出现只备份一半调制解调器固件的状态；flashimg=1 保留单独刷写镜像的能力。
+# 设备节点取自 /dev/block/bootdevice/by-name/（与 recovery.fstab 其余条目一致；slotselect 负责选 _b）。
+#
+# B1 修复（恢复原厂的只读 + SELinux 上下文）：
+#   仅把这三行搬过来时它们会以**读写、无 context** 的方式挂载 modem/dsp/bluetooth 裸分区，
+#   原厂在这三个挂载点上声明的 ro / context= 全部丢失。修复方式是给每条加 fsflags=<mount 选项>：
+#     * fsflags= 是 bootable/recovery/partition.cpp 的 tw_flags 表里的标志
+#       （{ "fsflags=", TWFLAG_FSFLAGS }），命中后走 TWPartition::Process_FS_Flags()：
+#         - 不带 '=' 的挂载标志（ro / nosuid / nodev / noatime …）进 mount_flags 表，
+#           ro 置 Mount_Read_Only（Mount() 里合成 MS_RDONLY）；
+#         - 其余 token 原样拼进 Mount_Options，由 mount(2) 直接收到。
+#       证据：partition.cpp 的 mount_flags[] / ignored_mount_items[] / Process_FS_Flags() 与
+#       Apply_TW_Flag() 里的 TWFLAG_FSFLAGS 分支（只读查阅上游源码，未改动任何上游文件）。
+#     * mount 选项逐字取自同机、已知可用的原厂 recovery 镜像自带 recovery.fstab
+#       （stock/recovery/ramdisk/system/etc/recovery.fstab:40-42）。**recovery 模式下 uid=0**：
+#       原厂 recovery 镜像的 /vendor/firmware_mnt 行就是 uid=0,gid=1000（设备上真正在跑的
+#       /vendor/etc/fstab.default:44 写的是 uid=1000,gid=1000，两者对同一份数据给出不同 uid，
+#       而 recovery 里 TWRP 以 root 运行、文件管理器也以 root 读取，取 recovery 镜像的值
+#       既与原厂 recovery 行为一致、又比 uid=1000 更严（只有 root 能读 modem 固件），故取 uid=0）。
+#       gid/dmask/fmask/context 三份来源一致（gid=1000、227/337、firmware_file / bt_firmware_file）。
+#     * 刻意**不**加 nosuid/nodev：原厂这三行本来就没有它们（原厂对 vfat 用 uid/gid/dmask/fmask
+#       + context 控权），本次只做"恢复原厂属性"，不引入原厂没有的改动。
+#     * 加错会怎样：未知 flag 只会得到 "Unhandled flag: '...'"，选项原样透传，不会损坏分区数据；
+#       但若 SELinux 策略里没有 firmware_file / bt_firmware_file 类型，mount 会直接失败，
+#       那一行就退化成"不可挂载"（备份/刷写走 dd，不依赖挂载，能力不受影响）。
+# 回归检查：
+#   1. 本文件这三行必须带 fsflags= 且含 ro；/firmware_mnt 与 /bt_firmware 必须带 context=；
+#      /dsp_firmware 必须带 barrier=1（原厂 /vendor/dsp 行就是 ext4 ro,nosuid,nodev,barrier=1）。
+#   2. 本文件不得出现 mountoptions=（tw_flags 表里没有这个标志，写了只会得到 "Unhandled flag"）。
+#   3. 这三条不得把 4 列 fstab 选项写在第 4 列：twrp.flags 解析器（partitionmanager.cpp 的
+#      Process_Fstab 读 /etc/twrp.flags 那段）把第 4 列当"备用块设备"（只有以 '/' 开头才收），
+#      真正的 TWRP 标志在第 5 列的 flags= 里。
+#   4. recovery.fstab 不得再出现 /vendor/firmware_mnt、/vendor/dsp、/vendor/bt_firmware。
+/firmware_mnt        vfat    /dev/block/bootdevice/by-name/modem         flags=slotselect;display="firmware_mnt";backup=1;flashimg=1;subpartitionof=/modem;fsflags=ro,shortname=lower,uid=0,gid=1000,dmask=227,fmask=337,context=u:object_r:firmware_file:s0
+/dsp_firmware        ext4    /dev/block/bootdevice/by-name/dsp           flags=slotselect;display="dsp_firmware";backup=1;flashimg=1;subpartitionof=/modem;fsflags=ro,nosuid,nodev,barrier=1
+/bt_firmware         vfat    /dev/block/bootdevice/by-name/bluetooth     flags=slotselect;display="bt_firmware";backup=1;flashimg=1;subpartitionof=/modem;fsflags=ro,shortname=lower,uid=1002,gid=3002,dmask=227,fmask=337,context=u:object_r:bt_firmware_file:s0
+
+# ---------------------------------------------------------------- 可移动存储（B2）
+# /usb_otg：TWRP 侧用 auto 通配符（见下），不写设备路径。
+#
+# /sdcard1（B2，实测复现，但本轮无法在设备上验证修法）：
+#   实测（只读 adb，会话 2026-10-05）：
+#     * microSD 卡**已在位**：/dev/block/mmcblk0 + mmcblk0p1（31 166 976 KiB ≈ 29.7 GiB），
+#       p1 的引导扇区含 "FAT32"（偏移 82 起的填充串）+ 标签 "android"
+#       → 卡本身正常，vfat 可挂。
+#     * 但 TWRP 运行日志里 /sdcard1 依旧是
+#         I:Processing '/sdcard1' / I:Created '/sdcard1' folder. / I:Unable to mount '/sdcard1'
+#       即 auto 路径在当前镜像上**没有**解析到 mmcblk0p1。
+#     * 卡所在控制器：/sys/class/mmc_host 只有 mmc0，对应
+#       /sys/devices/platform/soc/8804000.sdhci/mmc_host（实机存在）。
+#       原厂 recovery 镜像 fstab 的第二条 1da4000.ufshc_card/host* 在这台机器上
+#       **不存在**（ls → No such file or directory），原厂自己第一条写的也是 8804000.sdhci。
+#       本文件早先的注释把它当成"待确认写法"是不对的：那个节点不是"写法差异"，是不存在。
+#   为什么这里仍然是 auto 而不是照抄原厂一条 /devices/... 行：
+#     twrp.flags 里**不能**写 /devices/...。解析器（partitionmanager.cpp 读 /etc/twrp.flags
+#     的那段）把行首第一个字段直接当作挂载点，再按第 3 个字段找块设备；而
+#     Process_Fstab_Line() 只在第一个字段以 '/' 开头时才走 fstab v2 分支——
+#     /devices/platform/... 会被当成**挂载点**，而不是块设备通配符。
+#     原厂 recovery.fstab 是 fs_mgr 格式（src 在前、voldmanaged 由 vold 解析），
+#     TWRP 侧没有这条通路；照抄只会得到一个挂载点叫 /devices/... 的废条目。
+#     → voldmanaged=sdcard1:auto 在原厂是 vold 负责识别设备；TWRP 侧没有这条通路。
+#   ❌ 上一轮的推测"auto 通配符由 TWRP 自己去扫块设备"**是错的**（t5 集成审查实测更正）：
+#     上游 bootable/recovery 里 "auto" 只作为**挂载点**有意义——
+#       partition.cpp Classify_By_Mount_Point():519   if (Mount_Point == "auto") { Mount_Point = "/auto" + n; ... }
+#     而本文件第 3 列是**块设备**，取值不会经过上面这条分支。"通配符"只有两条实际通路：
+#       a) /devices/... 开头的行 → Apply_Block_Device_Attributes() 把它存进 Sysfs_Entry 并置
+#          Wildcard_Block_Device=true，最终由 uevent 补上块设备；但 twrp.flags 里行首字段会被当成
+#          挂载点（见上），所以这条路在本文件里写不出来；
+#       b) 设备字段里含 '*' → 同一函数置 Wildcard_Block_Device=true，Find_Actual_Block_Device()
+#          → Find_Wildcard_Block_Devices() 对 /dev/block 目录按 '<前缀>*' 展开。
+#     "auto" 两条都不满足，于是它一直是字面串。实机证据（当前镜像，只读 adb）：
+#       /tmp/recovery.log:740-753  /sdcard1  →  Size: 0 B、Flags 里没有 IsPresent、
+#                                  Primary_Block_Device: auto
+#       /tmp/recovery.log:754-766  /usb_otg →  同上（所以 /usb_otg 也没挂上）
+#       /tmp/recovery.log:154/156  Unable to mount '/sdcard1' / '/usb_otg'
+#     即 B2 **未被修好**：卡在位（mmcblk0p1 可读）而 TWRP 拿不到设备节点，本轮不声称已修复。
+#     修法必须等新镜像刷入后按实机日志验证，例如给本文件写一条设备字段带 '*' 的条目
+#     （TWRP 会按前缀展开 /dev/block 下的块设备）；但这条方案在本轮**未验证**，
+#     且内核 /sys/block/mmcblk0/removable=0，TWRP 是否过滤 removable 也还没定性，
+#     因此本轮不改行为，避免用一条无法验证的写法替换另一条。
+# 回归检查：本文件不得再出现 1da4000.ufshc_card，也不得把 /devices/... 写成第 1 列；
+#           两条 auto 条目在修好之前必须保留"未解决"标注，不得被当作已修复。
 /usb_otg             vfat    auto                                       flags=display="USB-OTG";storage;wipeingui;removable
 /sdcard1             vfat    auto                                       flags=display="MicroSD";storage;wipeingui;removable

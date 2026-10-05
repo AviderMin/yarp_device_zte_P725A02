@@ -70,8 +70,34 @@ TARGET_BOOTLOADER_BOARD_NAME := lito
 TARGET_NO_BOOTLOADER := true
 
 # ---------------------------------------------------------------- Display
+# 1080x2460 @ 6.9", panel VISIONOX RM692C9 (10-bit, DSC, command mode).
+# Physically ~400 PPI, but the stock ROM ships ro.sf.lcd_density=480 and this
+# setting is exactly what produces it
+# (build/make/core/sysprop_config.mk:127-129 -> ro.sf.lcd_density), so 480 is
+# the device's own density and must not be "corrected" to the physical value.
 TARGET_SCREEN_DENSITY := 480
-TARGET_RECOVERY_DEFAULT_REFRESH_RATE := 90
+
+# There is deliberately NO "default refresh rate" knob here.  The generated
+# tree carried
+#     TARGET_RECOVERY_DEFAULT_REFRESH_RATE := 90
+# which is a DEAD variable: a repo-wide grep over the TWRP 16 checkout
+# (bootable/, vendor/, build/make/, system/core/, hardware/qcom-caf/, device/)
+# finds it only in this device tree and nowhere in any makefile or source file,
+# so it could never have affected a build.  Mode selection in the DRM backend is
+# driven purely by kernel data:
+#   twrpminui/graphics_drm.cpp:1023-1044  find_main_monitor() picks the mode
+#       named by video=Virtual-1: on /proc/cmdline, else the first mode with
+#       DRM_MODE_TYPE_PREFERRED - it never looks at a refresh rate;
+#   twrpminui/graphics_drm.cpp:1291-1294  the chosen mode's hdisplay/vdisplay
+#       become the framebuffer size;
+#   twrpminui/graphics_drm.cpp:1470       that mode is applied via a DRM
+#       property blob.
+# The panel actually runs at 90 Hz because the BOOTLOADER selects the 90 Hz
+# panel variant, not because of anything in this tree:
+#   /proc/cmdline           msm_drm.dsi_display0=qcom,dsi_visionox_rm692c9_10bit_dsc_90hz_cmd_display:
+#   dmesg                   Successfully bind display panel 'qcom,dsi_visionox_rm692c9_10bit_dsc_90hz_cmd_display'
+#   /sys/class/drm/.../modes  1080x2460x60x63334cmd and 1080x2460x90x88154cmd
+# Do not re-add a refresh-rate setting: there is no consumer for one.
 
 # ----------------------------------------------------------------- Kernel
 # Every value below is copied from the STOCK images, not guessed:
@@ -215,16 +241,60 @@ PLATFORM_VERSION := 99.87.36
 
 # ------------------------------------------------------ TWRP configuration
 TW_THEME := portrait_hdpi
+TW_FRAMERATE := 120
 TW_EXTRA_LANGUAGES := true
 TW_SCREEN_BLANK_ON_BOOT := true
 TW_USE_TOOLBOX := true
 TW_INCLUDE_REPACKTOOLS := true
 TW_HAS_EDL_MODE := true
-# The generated TW_INPUT_BLACKLIST held "hbtp_vm".  That input device does not
-# exist here - the stock kernel has zero hits for hbtp/hbtp_vm/hbtp_input and the
-# stock DTB never mentions it - so it was removed instead of inventing a driver
-# name.  Identify the real touch driver on hardware with
-#   cat /proc/bus/input/devices   before setting TW_INPUT_BLACKLIST again.
+# TW_INPUT_BLACKLIST stays unset, and that is now CONFIRMED on hardware (not
+# merely "not proven"): the generated tree blacklisted "hbtp_vm", which does not
+# exist here, and of the five registered input devices exactly one is
+# touchscreen-class, so there is nothing that needs to be filtered out.
+#
+# Device-verified facts (read-only adb; raw dumps in log/session-20261005-2150/):
+#   /proc/bus/input/devices  raw2/008-input-devices.out, raw/930-input-devices.out
+#   ------------------------ ------------------------------------------------
+#   goodix_ts   (event4)     THE touchscreen.  ABS=0x0261800000000003 +
+#                            BTN_TOUCH + BTN_TOOL_FINGER => protocol-B
+#                            multitouch, i.e. TWRP's events.cpp:434-437
+#                            has_touch_protocol test passes
+#                            (BTN_TOUCH and ABS_MT_POSITION_X/Y both set).
+#                            Driver probes clean: goodix_ts_probe OUT r:0,
+#                            "input: goodix_ts as .../input4", IRQ 372.
+#   gpio-keys   (event3)     KEY=0xc000000000000 = bits 114/115 =
+#                            KEY_VOLUMEUP/KEY_VOLUMEDOWN.
+#   qpnp_pon    (event0)     KEY=0x14000000000000 = bits 116/118 =
+#                            KEY_POWER/KEY_POWER2 (pm8150 pwrkey+resin).
+#   ah1898      (event1)     EV=3, KEY bitmap empty => hall sensor, sends only
+#                            EV_KEY 0/1 - cannot inject a key press or a touch.
+#   goodix_fp   (event2)     fingerprint; not touchscreen-class.
+# TWRP reads all of these with ev_get() (events.cpp:1345) after ev_init() scans
+# /dev/input (events.cpp:462-470), and the device nodes exist with the expected
+# ownership:
+#   /dev/input/event*                                      crw-rw---- root input
+#   /sys/class/leds/vibrator/{duration,activate}           -rw-rw-r-- root root
+#   /sys/class/backlight/panel0-backlight/{brightness,max_brightness}
+# The backlight path is auto-discovered - recovery.log prints
+#   "Found brightness file at '/sys/class/backlight/panel0-backlight/brightness'"
+# which is data.cpp:795 find_first_named_file("brightness", "/sys/class/backlight")
+# - so a TW_BRIGHTNESS_PATH override would be redundant and is deliberately NOT
+# set.  TWRP's own initial default is tw_brightness = 255/5 = 51 (data.cpp:828),
+# and it is only a default: the value actually used comes from the persisted
+# twrp settings file, which is why recovery.log shows 100 on this unit (device
+# side, not this tree's business).  max_brightness=255 makes any TWRP value
+# 0..255 legal, and TW_SCREEN_BLANK_ON_BOOT (gui.cpp:940) writes 0 on boot -
+# recovery.log shows exactly that 100 -> 0 sequence.
+#
+# NO haptics switch either: this device's vibration motor IS reachable through
+# the interface TWRP writes (events.cpp:65-68, 352-358 and 380) - the PMIC
+# driver registers it as an LED class device
+#   /sys/class/leds/vibrator/{duration,activate}   (device -> qcom,vibrator@5300)
+# so the "vibrate_with_ff()" route is not needed and "TW_NO_HAPTICS := true"
+# would be factually wrong.  A haptic effect can be reproduced without TWRP by
+#   echo 200 > /sys/class/leds/vibrator/duration
+#   echo 1   > /sys/class/leds/vibrator/activate
+# (writing it buzzes the phone; this tree never does it automatically).
 
 # ------------------------------------------------------------- Crypto (FBE)
 # Deliberately NOT enabled.  See device.mk: turning TW_INCLUDE_CRYPTO on only
@@ -232,3 +302,20 @@ TW_HAS_EDL_MODE := true
 # Qualcomm keymaster/qseecom blobs from the stock vendor partition and has to be
 # validated on hardware.  Claiming it from a build flag alone would be false.
 TW_INCLUDE_CRYPTO := false
+
+# Encryption
+BOARD_USES_METADATA_PARTITION := true
+BOARD_USES_QCOM_FBE_DECRYPTION := true
+# Far-future patch level + version, observed to take effect in the TWRP-16
+# build of this tree (log/recovery.log shows ro.build.version.security_patch
+# = 2099-12-31 and ro.build.version.release = 99.87.36). These are build-time
+# props used to satisfy the Keymaster patch-level comparison during FBE
+# metadata decryption (README 5.2); they are NOT the device's real patch
+# level. VENDOR_SECURITY_PATCH feeds ro.vendor.build.security_patch via
+# build/make/core/sysprop_config.mk. If the upstream manifest/branch changes,
+# re-verify that these assignments still win (upstream AOSP guards
+# PLATFORM_SECURITY_PATCH with ifdef+$(error) in version_util.mk).
+PLATFORM_VERSION := 99.87.36
+PLATFORM_VERSION_LAST_STABLE := $(PLATFORM_VERSION)
+PLATFORM_SECURITY_PATCH := 2099-12-31
+VENDOR_SECURITY_PATCH := $(PLATFORM_SECURITY_PATCH)
