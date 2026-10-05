@@ -18,6 +18,7 @@
 | 镜像结构核对 | **通过**（镜像头、内核、DTB、ramdisk 内容逐项核对） |
 | FBE / metadata 解密 | **支持，但尚未在修好后的镜像上复验**：ramdisk 内置 qseecomd/keymaster 4.0/gatekeeper 1.0 + keymaster TA；t7 又修掉了两个实测阻断（可执行位、VINTF manifest），见「真机复验（t7）」 |
 | 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：显示、触摸、logical 分区、`/metadata` 均正常；`/data` 仍无法挂载，但 t7 已在真机上把根因定到 "keymaster HAL 从未启动"（不是分区损坏），修复待刷入复验 |
+| TWRP 设置持久化 | **已知缺陷，本轮只定性未修**：`/mnt/vendor/persist` 是三级挂载点，被 `Get_Root_Path()` 截成 `/mnt` 而永远挂不上，`.twrp_settings` 因此写在 ramdisk 上、重启即丢（见「真机复验（t7）」末节） |
 
 ## 重要风险提示（请先读）
 
@@ -450,30 +451,37 @@ t7 直接在运行中的 recovery 上取证（`adb shell`，设备 320607233569�
     $ adb shell dmesg | grep -c "cannot execv('/vendor_ramdisk/bin/qseecomd')"
     46
 
-成因是构建期没有任何东西给这三个文件定过权限位。它们是 `recovery/root/` 下的**普通文件**、
-不是 build module，因此走 `build/make/core/Makefile:2817-2818` 的整目录复制：
+**这个位在构建期设不了，只能在启动时由 init 设** —— 这是本轮最反直觉的一条，值得写清楚。
 
-    $(foreach item,$(recovery_root_private), cp -rf $(item) $(TARGET_RECOVERY_OUT)/;)
+直觉上的修法是在 recovery ramdisk 的 recipe 里 chmod：`BOARD_RECOVERY_IMAGE_PREPARE` 确实在
+`build/make/core/Makefile:2830` 展开，位置正好是"`recovery/root` 已复制完、ramdisk 尚未打包"，
+看起来完全对路。但它**是无效的，并且已被实测证伪**：加上之后暂存目录确实是 `0755`，
+打出来的镜像里仍是 `0644`。
 
-而 `cp` 对**新建**的目标文件采用源文件权限（git 里是 0644），ramdisk 打包器又原样保留——同一
-镜像里 `system/bin/recovery` 是 `0755`，说明打包器并不归一化权限。可以直接在产物里复核：
+原因是 mkbootfs 根本不看源文件权限。每个归档条目都要过 `fix_stat()`
+（`system/core/mkbootfs/mkbootfs.cpp`），它用 `fs_config()` 的返回值**无条件覆盖** `st_mode`；
+而 `fs_config()` 对一个不在任何 fs_config 表里的普通文件直接返回死值
+（`system/core/libcutils/fs_config.cpp:391-395`）：
 
-    $ gzip -dc out/target/product/P725A02/ramdisk-recovery.img | cpio -tvn | grep vendor_ramdisk/bin
-    -rw-r--r--  vendor_ramdisk/bin/qseecomd          # 修之前
+    *mode = (*mode & S_IFMT) | (dir ? 0755 : 0644);
 
-修法是用 TWRP 自己也在用的那个钩子（`BoardConfig.mk`）：
+`vendor_ramdisk/**` 不在任何表里（表里的条目是 `system/bin/*`、`vendor/bin/*`、
+`first_stage_ramdisk/system/bin/*` 这类），所以这三个文件在 `ramdisk-recovery.img` 里
+**永远是 0644**，与它在磁盘上的权限无关。这同时说明"在 git 里标成 100755"也救不了：打包器不看它，
+而且本检出在 Windows 文件系统上本来就表示不了可执行位。
 
-    BOARD_RECOVERY_IMAGE_PREPARE += \
-        chmod 0755 $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/qseecomd \
-                   $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti \
-                   $(TARGET_RECOVERY_ROOT_OUT)/vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti;
+因此可执行位只能由 init 在启动时补上——那也是唯一还能改它的层
+（`recovery/root/init.recovery.qcom.rc` 的 `on early-init`）：
 
-它在 recovery ramdisk 的 recipe 内部展开（`Makefile:2830`），位置正好在"`recovery/root` 已复制完、
-ramdisk 尚未打包"之间，所以只有这里的 chmod 才真的进得了镜像。必须用 `+=` 而不是 `:=`，
-因为 TWRP 把自己的 depmod 步骤加在同一个变量上（`vendor/twrp/build/tasks/kernel.mk:572`）。
+    chmod 0755 /vendor_ramdisk/bin/qseecomd
+    chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
+    chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
 
-刻意**不**采用"在 git 里把这三个文件标成 100755"的修法：本检出位于 Windows 文件系统，
-可执行位无法表示，下一次 clone 就会把这个修复悄悄丢掉。
+`chmod` 是 init 现役 builtin（`system/core/init/builtins.cpp:1017` 的 `do_chmod`，`:1288` 注册为
+`{2, 2}`），参数顺序是 **`chmod <八进制模式> <路径>`——模式在前**，很容易写反
+（`system/core/init/README.md:556`）。放在 `on early-init` 余量充足：这三个服务要么由 `on fs`
+启动、要么由更晚的属性触发器启动，而 init 按队列顺序执行动作；recovery 的 ramdisk 是可写
+rootfs，所以 `fchmodat()` 会成功。
 
 #### 阻断 2：ramdisk 里根本没有 VINTF manifest
 
@@ -529,18 +537,72 @@ manifest，两处都没有就返回 EMPTY。真机表现与代码完全吻合：
 `system/hwservicemanager/hwservicemanager_no_max.xml` 与
 `stock/vendor/etc/vintf/manifest.xml:76-94`。
 
-另一个坑：**XML 注释里不能出现连续两个连字符**，否则 expat 会拒绝整个文档。本文件第一版正是
-如此，解析器报 `not well-formed (invalid token): line 5, column 6`；现已由
-`tools/verify_decrypt_prereqs.mjs` 的 `vintf/xml-comment-safety` 与 `vintf/xml-parses` 两项守住。
+#### 用平台自己的解析器验证
+
+离线最有力的验证不是"看一眼"，而是让平台自己的 libvintf 解析它——宿主机上就有这个工具：
+
+    $ out/host/linux-x86/bin/assemble_vintf -i recovery/root/system/etc/vintf/manifest.xml -o /tmp/out.xml
+    $ echo $?
+    0
+
+它输出的四个 `<fqname>` 正是这次要的东西：
+
+    android.hidl.manager@1.2::IServiceManager/default
+    android.hidl.token@1.0::ITokenManager/default
+    android.hardware.keymaster@4.0::IKeymasterDevice/default
+    android.hardware.gatekeeper@1.0::IGatekeeper/default
+
+全部 `<transport>hwbinder</transport>`。
+
+**一个之前被我说重的点，在此更正**：本文件第一版的分节线用的是连字符，而 XML 规范禁止注释里出现
+连续两个连字符，Python 的 expat 也确实拒绝整个文档（`not well-formed (invalid token)`）。
+我据此一度判断"这会让整套 HIDL 起不来"。**这个判断是错的**：libvintf 用的是 tinyxml2
+（`system/libvintf/parse_xml.cpp:32`），它容忍这个序列，`assemble_vintf` 对带连字符注释的
+manifest 同样返回 0。所以那是一个**合法性缺陷，不是设备阻断**。分节线仍然改用 `=`，并且
+`vintf/xml-comment-safety` 与 `vintf/xml-parses` 两项继续保留它——原因是文件本来就该是良构
+XML，而 expat 系的工具（xmllint 等）会直接拒绝——但不再把它说成阻断项。
 
 #### 本轮回归检查
 
     node tools/verify_decrypt_prereqs.mjs --verbose
 
-新增断言：`vintf/*`（存在、四项内容与版本、type=framework、不放在失效的片段目录、
-注释安全、可被 expat 解析）、`keystore2/*`（触发条件、no_fatal 及其在 early-init、
-平台 service 定义未被改动）、`build/ramdisk-exec-bits` 与 `build/prepare-append`，
-以及在**已构建镜像**上直接读回的 `packed/exec-bits`。
+新增断言：`vintf/*`（存在、四项内容与版本、type=framework、不放在失效的片段目录、注释安全、
+可被 expat 解析）、`keystore2/*`（触发条件、no_fatal 及其在 early-init、平台 service 定义未被
+改动）、`rc/exec-bits` 与 `rc/exec-bits-early`（三行 chmod 都在 `on early-init` 块内且早于
+`on fs`）、`build/no-inert-exec-chmod`（防止那个实测无效的构建期 chmod 被加回来），
+以及在**已构建镜像**上读回 `init.recovery.qcom.rc` 的 `packed/exec-bit-strategy`。
+
+#### 仍未修（本轮只定性，未改）：/mnt/vendor/persist 永远挂不上
+
+实机取证：`mount | grep persist` 为空，但这两个目录存在，而且是 **0777 的根文件系统目录**
+（不是挂载点）：
+
+    $ adb shell ls -ld /mnt/vendor/persist /mnt/vendor/persist/TWRP
+    drwxrwxrwx  /mnt/vendor/persist
+    drwxrwxrwx  /mnt/vendor/persist/TWRP
+
+`recovery.log` 里对应的两行是：
+
+    I:Is_Mounted: Unable to find partition for path '/mnt/vendor/persist/TWRP'
+    I:UnMount: Unable to find partition for path '/mnt'
+
+原因是 TWRP 的路径助手只认**两级**挂载点。`TWFunc::Get_Root_Path()`
+（`bootable/recovery/twrp-functions.cpp:371-383`）把路径截到第一个斜杠之后：
+
+    size_t position = Local_Path.find("/", 2);
+    if (position != string::npos) Local_Path.resize(position);
+
+于是 `/mnt/vendor/persist/TWRP` → `/mnt`，而 `Mount_By_Path` / `UnMount_By_Path`
+（`partitionmanager.cpp:758-800`）拿 `/mnt` 去逐个比对 `partition->Mount_Point`，自然找不到。
+
+这与 fstab 注释里已经记录过的 `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware`
+是**同一类缺陷**；当时的处理（R2 修复）是"移出 recovery.fstab、改用 twrp.flags 里的一级挂载点"。
+`/mnt/vendor/persist` 这一行没有一起迁走，于是它现在是 `recovery.fstab` 里唯一一个超过两级的
+挂载点，也是唯一一个挂不上的。后果是 TWRP 把 `.twrp_settings` 写进 ramdisk 上的临时目录，
+**重启即丢**——语言、亮度、超时等设置不会保存。
+
+修法应与 R2 一致：把这一行从 `recovery.fstab` 移到 `twrp.flags`，改成一级挂载点。
+本轮没有动它：解密是主目标，而改挂载点需要配套的实机复核，不宜和这一轮的验证混在一起。
 
 ### keystore2 启动顺序（t4：唯一一次解密尝试的胜负手）
 
