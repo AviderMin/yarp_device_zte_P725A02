@@ -307,6 +307,27 @@ TW_INCLUDE_CRYPTO := true
 TW_INCLUDE_CRYPTO_FBE := true
 TW_INCLUDE_FBE_METADATA_DECRYPT := true
 TW_USE_FSCRYPT_POLICY := 2
+# The FBE path is on: TW_INCLUDE_CRYPTO_FBE := true above makes
+# vendor/twrp/config/BoardConfigSoong.mk:271-272 set TW_INCLUDE_CRYPTO_FBE when
+# TW_INCLUDE_CRYPTO is true, and that feeds soong variable include_crypto_fbe
+# (BoardConfigSoong.mk:286) -> -DTW_INCLUDE_FBE
+# (vendor/twrp/build/soong/Android.bp:295-297).  Verified in the built binary:
+#   strings out/target/product/P725A02/ramdisk-recovery.img's
+#   /system/bin/recovery | grep -c "misc/vold/user_keys"  ->  1   (only compiled
+#   under #ifdef TW_INCLUDE_FBE), while the string that lives in the #else branch
+#   ("FBE found but FBE support not present in TWRP", partition.cpp:800+) is 0.
+# regression: tools/verify_decrypt_prereqs.mjs check "fbe-macro"
+# Pin the keymaster HAL generation instead of deriving it from /vendor.
+# Process_Keymaster_Version() (partitionmanager.cpp:265-302) otherwise reads
+# <partition>/etc/vintf/manifest.xml, and TWRP unmounts /vendor again before it
+# calls Decrypt_Data() (partitionmanager.cpp:453-456 / 561).  The stock vendor
+# manifest declares android.hardware.keymaster 4.0 and 4.1
+# (stock/vendor/etc/vintf/manifest.xml:87-90), and this device tree ships exactly
+# the 4.0 HAL, so 4.x is the correct value here.  Both the macro and the property
+# are needed: TW_FORCE_KEYMASTER_VER short-circuits the manifest probe
+# (vendor/twrp/build/soong/Android.bp:403-406) and keymaster_ver supplies the
+# value (variables.h:161 TW_KEYMASTER_VERSION_PROP).
+TW_FORCE_KEYMASTER_VER := true
 
 # Encryption
 BOARD_USES_METADATA_PARTITION := true

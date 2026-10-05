@@ -50,6 +50,54 @@
 # that upstream init.rc does not provide lives there - see that file's header.
 # Only the /system/etc -> /etc symlink is not repeated here.
 
+on early-init
+    # ------------------------------------------------------------------
+    # QTI crypto services run from the ramdisk, never from /vendor.
+    #
+    # TWRP mounts /vendor only to read the keymaster manifest and the vendor
+    # build.prop, then unmounts it again before it decrypts:
+    #   * partitionmanager.cpp:426 (Process_Fstab, first pass) mounts /vendor
+    #   * partitionmanager.cpp:453-456 / 487-515 (Setup_Fstab_Partitions)
+    #     unmounts it again
+    #   * partitionmanager.cpp:560-561 then sets TW_IS_ENCRYPTED=1 and calls
+    #     Decrypt_Data()
+    # init starts services asynchronously and one action command per main-loop
+    # pass (system/core/init/init.cpp, builtins.cpp do_start), so a
+    # "start <vendor hal>" queued from a /vendor-triggered action races with
+    # that unmount and normally loses: init forks the HAL after /vendor/bin is
+    # already gone.  Without keymaster, Decrypt_Data() cannot unwrap the
+    # hardware-wrapped metadata key, dm-default-key is never created, /data
+    # never mounts, and TW_IS_ENCRYPTED stays 1 -> gui_loadResources()
+    # (gui/gui.cpp:990-999) loads the decrypt page forever, although the device
+    # has no passphrase at all.
+    #
+    # The blobs themselves live in recovery/root/vendor_ramdisk/ (staged by the
+    # device tree, see README "无密码解密" ): qseecomd, the keymaster 4.0 HAL,
+    # the gatekeeper 1.0 HAL and their shared-library closure.  Nothing here
+    # depends on /vendor, on the vendor mapper node or on twrp.super.* props.
+    # ------------------------------------------------------------------
+    mkdir /vendor_ramdisk 0755 root root
+    # Trustlet directory.  libkeymasterdeviceutils.so opens the keymaster TA at
+    # the hardcoded /vendor/firmware_mnt/image (that literal string is in the
+    # stock library), so this path must exist before keymaster-4-0 runs and must
+    # never be shadowed by a mount.
+    mkdir /vendor/firmware_mnt 0755 root root
+    mkdir /vendor/firmware_mnt/image 0755 root root
+    # /vendor/bin and /vendor/lib64 are bind mounts, not a copy: the linker
+    # resolves the HAL's DT_NEEDED list through the paths the services export as
+    # LD_LIBRARY_PATH, and a future mount of the real vendor partition over
+    # /vendor would hide a copied tree (it cannot hide these: they are what
+    # /vendor shows in the first place).
+    mkdir /vendor/bin 0755 root root
+    mkdir /vendor/lib64 0755 root root
+    mkdir /vendor/lib64/hw 0755 root root
+    mount none /vendor_ramdisk/bin /vendor/bin bind
+    mount none /vendor_ramdisk/lib64 /vendor/lib64 bind
+    mount none /vendor_ramdisk/lib64/hw /vendor/lib64/hw bind
+    # Let the kernel firmware loader find the keymaster trustlet too: it walks
+    # the firmware_directories list in recovery/root/system/etc/ueventd.rc.
+    write /sys/module/firmware_class/parameters/path /vendor/firmware_mnt/image
+
 on init
     # The stock recovery ramdisk does exactly this (200).
     write /sys/class/backlight/panel0-backlight/brightness 200
@@ -64,37 +112,77 @@ on property:ro.boot.usbcontroller=*
     # ".dwc3" suffix.  Left disabled on purpose.
     # write /sys/class/udc/${ro.boot.usbcontroller}/device/../mode peripheral
 
+# ---------------------------------------------------------------------------
+# Qualcomm secure services and the metadata key directory.
+#
+# /dev/block/bootdevice is the symlink created just above; the by-name links are
+# created by ueventd while it processes the UFS "block" uevents, so 'on fs' (the
+# trigger TWRP's own init.rc fires from late-init, before the recovery service
+# is forked) is early enough for them and still long before TWRP reaches
+# Partition_Post_Processing().
 on fs
     wait /dev/block/platform/soc/${ro.boot.bootdevice}
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
 
-# ---------------------------------------------------------------------------
-# Qualcomm secure services required to unwrap the metadata-encryption key.
-#
-# TWRP creates the logical vendor mapper before setting
-# twrp.super.symlinks_created. Mount vendor at that point, then start the stock
-# QSEECom and Keymaster 4.0 services. Without them metadataDecrypt() fails and
-# TWRP shows its generic password page even when Android has no screen lock.
-on property:twrp.super.symlinks_created=true
-    mkdir /vendor 0755 root root
-    wait /dev/block/mapper/vendor${ro.boot.slot_suffix}
-    mount ext4 /dev/block/mapper/vendor${ro.boot.slot_suffix} /vendor ro
-    start vendor.qseecomd
-    start keymaster-4-0
+    # Mount /metadata before TWRP decrypts.  The wrapped key lives in
+    # /metadata/vold/metadata_encryption and Decrypt_Data() (partitionmanager.cpp
+    # :604-607) only tries Mount_By_Path(data->Key_Directory) - a lookup that runs
+    # through Find_Partition_By_Path(), which truncates "/metadata/vold/..." to
+    # "/metadata".  Having it mounted up front removes that ordering dependency.
+    # UnMount_Main_Partitions() (partitionmanager.cpp:2305-2323) only touches
+    # /vendor, the Android root, /product, /boot and /data, so this mount
+    # survives until the keys are unwrapped.
+    wait /dev/block/bootdevice/by-name/metadata 10
+    mkdir /metadata 0755 root root
+    mount ext4 /dev/block/bootdevice/by-name/metadata /metadata noatime,nosuid,nodev,discard
 
-service vendor.qseecomd /vendor/bin/qseecomd
+    # qseecomd registers the QSEE listeners and then publishes
+    # vendor.sys.listeners.registered - that is the only vendor.sys.* property
+    # the stock binary sets (strings -a stock/vendor/bin/qseecomd).  Its RPMB/SSD
+    # listeners need /dev/qseecom and the ssd by-name link, otherwise it logs
+    # "ERROR: RPMB_INIT failed, shall not start listener services" and never
+    # registers anything.  Both nodes are labelled by the ramdisk's ueventd.rc
+    # (/dev/qseecom 0660 system drmrpc, /dev/ion 0664 system system - ION is
+    # required because QSEECom allocates its shared buffers through it).
+    wait /dev/qseecom 10
+    wait /dev/block/bootdevice/by-name/ssd 10
+    start vendor.qseecomd
+
+# The HALs must wait for qseecomd's listeners *and* hwservicemanager; without
+# that gate they call QSEECom_start_app before QSEE is ready and crash-loop.
+on property:hwservicemanager.ready=true && property:vendor.sys.listeners.registered=true
+    start keymaster-4-0
+    start gatekeeper-1-0
+
+service vendor.qseecomd /vendor_ramdisk/bin/qseecomd
     class core
     user root
     group root drmrpc
-    setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64
+    setenv LD_LIBRARY_PATH /vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64
     disabled
     seclabel u:r:recovery:s0
 
-service keymaster-4-0 /vendor/bin/hw/android.hardware.keymaster@4.0-service-qti
+# The keymaster 4.0 HAL is what keystore2 talks to for the TRUSTED_ENVIRONMENT
+# security level, i.e. the only component that can export the wrapped storage
+# key during metadata decryption.
+service keymaster-4-0 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
     class early_hal
     user system
     group system drmrpc
     interface android.hardware.keymaster@4.0::IKeymasterDevice default
-    setenv LD_LIBRARY_PATH /vendor/lib64:/vendor/lib64/hw:/system/lib64
+    setenv LD_LIBRARY_PATH /vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64
+    disabled
+    seclabel u:r:recovery:s0
+
+# Gatekeeper 1.0 is declared by the stock vendor vintf manifest; TWRP's
+# Decrypt_Device() ("decrypt with default password" path) and the credential
+# checks go through it.  It is bound to the same QSEECom daemon, so it is gated
+# exactly like keymaster.
+service gatekeeper-1-0 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+    class early_hal
+    user system
+    group system drmrpc
+    interface android.hardware.gatekeeper@1.0::IGatekeeper default
+    setenv LD_LIBRARY_PATH /vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64
     disabled
     seclabel u:r:recovery:s0

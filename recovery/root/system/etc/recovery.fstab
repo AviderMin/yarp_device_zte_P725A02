@@ -102,8 +102,12 @@ vendor                                                  /vendor                e
 #   改动与否都不影响运行期行为，只会掩盖 D2 本身。
 #
 # 重要限制（不要误判为 fstab 能修）：/data 是 FBE + ICE + wrappedkey，密钥经 keymaster 包在
-# /metadata/vold/metadata_encryption；本镜像 TW_INCLUDE_CRYPTO := false 且未带
-# qseecom/keymaster 库与服务，因此不存在可用的解密路径；任何情况下都不要格式化 userdata。
+# /metadata/vold/metadata_encryption。TW_INCLUDE_CRYPTO := true（见 BoardConfig.mk 的
+# Crypto 段），qseecomd / keymaster@4.0 / gatekeeper@1.0 及其依赖库现在直接随 recovery
+# ramdisk 提供（recovery/root/vendor_ramdisk/，TA 在 recovery/root/vendor/firmware_mnt/
+# image/），由 recovery/root/init.recovery.qcom.rc 在 TWRP 解密之前启动，解密路径不再依赖
+# 被 TWRP 卸掉的 /vendor。回归检查见 tools/verify_decrypt_prereqs.mjs。
+# 无论修复是否生效，任何情况下都不要格式化 userdata：先取证、再判断。
 #
 # 裸块证据的边界（避免过度断言）：内核 F2FS 驱动在同一块设备上先后探测两个 superblock，
 # 两个 magic 都不对：

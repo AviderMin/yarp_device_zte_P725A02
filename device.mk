@@ -69,10 +69,11 @@ TARGET_RECOVERY_DEVICE_MODULES += \
 RECOVERY_LIBRARY_SOURCE_FILES += \
     $(TARGET_OUT_SHARED_LIBRARIES)/libion.so
 
-# ------------------------------------------------------------- Properties
+# ------------------------------------------------------------------ Properties
 # ro.boot.dynamic_partitions is set by the bootloader; nothing to override.
 PRODUCT_PROPERTY_OVERRIDES += \
-    ro.adb.secure=0
+    ro.adb.secure=0 \
+    keymaster_ver=4.x
 
 # ------------------------------------------------------------------ Crypto
 # Build the TWRP FBE and metadata-decryption path.  The raw userdata partition is

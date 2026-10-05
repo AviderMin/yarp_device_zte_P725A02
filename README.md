@@ -16,14 +16,21 @@
 | 静态证据核对 | 通过 |
 | 编译验证 | **通过**（`mka recoveryimage` 成功产出 recovery.img） |
 | 镜像结构核对 | **通过**（镜像头、内核、DTB、ramdisk 内容逐项核对） |
-| FBE / metadata 解密 | **不支持**，明确不宣称 |
-| 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：已拿到一次实机运行的 `log/`；显示、触摸、logical 分区、`/metadata` 均正常，`/data` 无法挂载（原因见实机检查清单 6a） |
+| FBE / metadata 解密 | **支持**（ramdisk 内置 qseecomd/keymaster 4.0/gatekeeper 1.0 + keymaster TA，见「FBE」一节） |
+| 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：已拿到一次实机运行的 `log/`；显示、触摸、logical 分区、`/metadata` 均正常，`/data` 无法挂载（原因见实机检查清单 6a；该次运行的镜像早于本轮解密修复） |
 
 ## 重要风险提示（请先读）
 
-1. **不支持 FBE 解密。** 本设备 userdata 使用 FBE + ICE + wrappedkey。当前构建
-   未包含高通 qseecom / keymaster 相关库与服务，进入 TWRP 后**无法解密 data**，
-   也无法读取加密后的用户数据。`TW_INCLUDE_CRYPTO := false`。详见下文“FBE 限制”。
+1. **FBE / metadata 解密已编译进来，但尚未在真机上复验。** 本设备 userdata 使用
+   FBE + ICE + wrappedkey。设备树现在随 recovery ramdisk 一起提供 qseecomd、
+   keymaster@4.0、gatekeeper@1.0 及其依赖库（`recovery/root/vendor_ramdisk/`）和
+   keymaster TA（`recovery/root/vendor/firmware_mnt/image/`），由
+   `recovery/root/init.recovery.qcom.rc` 在 TWRP 调用 `Decrypt_Data()` 之前启动，
+   不再依赖会被 TWRP 卸掉的 `/vendor`；`TW_INCLUDE_CRYPTO := true`、
+   `TW_INCLUDE_CRYPTO_FBE := true`、`TW_INCLUDE_FBE_METADATA_DECRYPT := true`。
+   静态回归检查：`node tools/verify_decrypt_prereqs.mjs`。
+   **在重新构建并刷入、看到 `Successfully decrypted metadata encrypted data partition`
+   之前，不要对外宣称已能解密 data。**
 2. **镜像使用 AOSP 测试密钥签名。** `BOARD_AVB_RECOVERY_KEY_PATH` 指向
    `external/avb/test/data/testkey_rsa2048.pem`，这是公开私钥。在**锁定的**（locked）
    设备上，该镜像无法通过厂商签名校验，可能直接拒绝引导；在已解锁设备上可引导，
@@ -400,10 +407,16 @@ magiskboot unpack -h recovery.img   # 期望 header v2、pagesize 4096、
 而是独立的 keymaster 分区（`stock/rawprogram4.xml:12` 的 `keymaster_a`）。
 
 已核实：原厂 recovery 镜像的 ramdisk（433 个 cpio 条目）**不含**上述任何库或服务，
-本仓库也没有这些二进制。因此本设备树**不启用**加密支持：
-`TW_INCLUDE_CRYPTO := false`、`TW_INCLUDE_CRYPTO_FBE := false`，
-`recovery/root/init.recovery.qcom.rc` 中相关服务以注释形式给出模板。
-在提取到上述文件并通过实机验证之前，**不要**声称可以解密 data。
+本仓库也没有这些二进制；本设备树改为把它们作为 prebuilt 放进 recovery ramdisk：
+`recovery/root/vendor_ramdisk/{bin,lib64}` 里是原机 vendor 分区提取的
+qseecomd / keymaster@4.0 / gatekeeper@1.0 与它们的库依赖闭包（含 gatekeeper 的
+`hw/android.hardware.gatekeeper@1.0-impl-qti.so`），TA 镜像（`keymaster.mdt` 与
+`keymaster.b00..b07`）放在 `recovery/root/vendor/firmware_mnt/image/` ——
+`libkeymasterdeviceutils.so` 把该路径写死为 `/vendor/firmware_mnt/image`。
+`TW_INCLUDE_CRYPTO := true`、`TW_INCLUDE_CRYPTO_FBE := true`、
+`TW_INCLUDE_FBE_METADATA_DECRYPT := true`，服务定义在
+`recovery/root/init.recovery.qcom.rc` 中（`on fs` 启动 qseecomd，等
+`vendor.sys.listeners.registered` 后再由属性触发器拉起两个 HAL）。
 
 ### AVB 签名（使用公开测试密钥）
 
@@ -470,8 +483,12 @@ grep -nE '^(TARGET_COPY_OUT_(PRODUCT|ODM)|BOARD_(SUPER|RECOVERYIMAGE)_PARTITION_
    这两个分区（见「super 的实际内容」），odm 的内容在 `/vendor/odm`，system_ext 的内容在
    `/system_root/system/system_ext`。
 5. **存储与备份**：能否正确识别内部存储与外部存储，备份/恢复是否可用。
-6. **FBE**：当前不支持，进入后应预期无法挂载 `/data`；如需支持，先提取
-   qseecom/keymaster 相关文件并单独验证。
+6. **FBE / metadata 解密**：预期 `/data` 能解密并挂载；关键日志是
+   `Successfully decrypted metadata encrypted data partition with new block device`
+   与其后的 `File Based Encryption is present`。若出现
+   `I:Unable to decrypt metadata encryption`，先看 `logcat`/恢复日志里
+   `vendor.qseecomd`、`keymaster-4-0`、`gatekeeper-1-0` 是否起来，
+   以及 `/vendor/firmware_mnt/image` 是否存在。
 6a. **`/data` 挂载失败的真实根因（已由实机日志确定，2026-10 补充）**：
    截取的实机日志在 `log/dmesg.txt` 与 `log/recovery.txt`。结论是**原始分区上没有有效的
    F2FS 文件系统**，而不是“解密不了”：

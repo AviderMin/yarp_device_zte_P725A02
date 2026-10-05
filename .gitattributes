@@ -1,0 +1,5 @@
+# The recovery ramdisk ships prebuilt vendor crypto blobs (qseecomd, keymaster,
+# gatekeeper and their dependency closure) plus the keymaster trustlet; git must
+# never normalise them.
+recovery/root/vendor_ramdisk/** binary
+recovery/root/vendor/firmware_mnt/image/** binary
