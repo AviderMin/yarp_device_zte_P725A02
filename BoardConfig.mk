@@ -241,7 +241,7 @@ PLATFORM_VERSION := 99.87.36
 
 # ------------------------------------------------------ TWRP configuration
 TW_THEME := portrait_hdpi
-TW_FRAMERATE := 120
+TW_FRAMERATE := 90
 TW_EXTRA_LANGUAGES := true
 TW_SCREEN_BLANK_ON_BOOT := true
 TW_USE_TOOLBOX := true
