@@ -22,11 +22,12 @@ vendor                                                  /vendor                e
 # ---- Metadata：FBE 密钥存储，包装密钥经 keymaster
 /dev/block/bootdevice/by-name/metadata                      /metadata              ext4    noatime,nosuid,nodev,discard             wait,check,formattable,wrappedkey
 
-# ---- Userdata：FBE + ICE，v2 几何 + 裸密钥（不写 wrappedkey_v0）
-# 本内核的 dm-default-key 走 blk-crypto，sector_size/iv_large_sectors 是硬要求；
-# 不写 wrappedkey_v0 让 vold 交出裸密钥，从而不依赖 ICE 解包。见 README t11。
+# ---- Userdata：FBE + ICE + wrappedkey，legacy 格式 + set_dun（见 README t11）
+# :v1 显式钉版本；v1 分支要求 metadata_encryption 缺席。
+# set_dun 由 ro.crypto.set_dun=1 打开（device.mk），legacy 分支才会发出它。
+# wrappedkey_v0 由 platform-patches/ 的 libdm 补丁补上。
 # 绝对不要格式化 /data：先取证再判断，依据见 README。
-/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,wait,check,formattable,quota,reservedsize=128M,fileencryption=ice:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts,checkpoint=fs
+/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,wait,check,formattable,quota,reservedsize=128M,fileencryption=ice:aes-256-cts:v1,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,checkpoint=fs
 
 # ---- 持久化固件/属性
 # 三级挂载点，TWRP 找不到（Get_Root_Path 截断），见 README 的 t8 末节。
