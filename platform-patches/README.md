@@ -70,3 +70,70 @@ if (use_legacy_options_format_) {
 * 这段代码属于 `system/core`，**不在设备树里**；重新 sync TWRP 源码后需要重新应用。
 * 补丁末尾的 `LOG(INFO)` 是**临时排障用的**（只打印格式标志与密钥长度，不打印密钥本身），
   解密确认可用之后应当删掉。
+
+---
+
+## 0002 — 把 iv_offset 还回来（这是最终让 /data 解开的那一处）
+
+**症状**：dm 设备建得起来、内核接受密钥、dm 层确实在变换数据，但明文全是噪声：
+
+```
+F2FS-fs (dm-6): Magic Mismatch, valid(0xf2f52010) - read(0x23aff3d6)
+```
+
+**怎么找到的**：设备系统能正常进桌面（`/data` 正常挂载 → 密钥和数据是好的），而且设备上**自带 `dmctl`**
+（`/system/bin/dmctl`，需要 `su -c`）。用它把原厂自己那张表读出来：
+
+```
+原厂: aes-xts-plain64 - 25874496 8:9 0 3 allow_discards sector_size:4096 iv_large_sectors
+我们: aes-xts-plain64 - 0        8:9 0 4 allow_discards sector_size:4096 iv_large_sectors set_dun
+```
+
+密文名一致（顺带纠正：`aes_256_xts` 的 kernel name 就是 `aes-xts-plain64`，早期把它当成 `AES-256-XTS` 是我的假设而非阅读）。
+**真正的差异是第三个字段，它就是 IV offset。**
+
+**根因**：`dm-default-key` 对某个扇区的 IV 取自 `(sector + iv_offset)`。数据是用 offset 25874496 写的，
+而我们用 0 去读——**每个块的 IV 都是错的**，于是明文必然全是噪声，但表本身完全合法，所以内核一声不吭。
+
+Android 11 的 libdm 从这个位置发的是 `DmTargetDefaultKey` 构造函数传进来的 offset；
+**Android 16 把这个参数删掉了**：第 6 个参数变成了 `start_sector`，而 `GetParameterString()` 里写死 `"0"`。
+全树搜索 `iv_offset` 只有那一处硬编码——**所以无论 fstab 怎么调都不可能修好**。
+
+### 改动
+
+```
+system/core/fs_mgr/libdm/include/libdm/dm_target.h   + SetIvOffset() 与成员 iv_offset_
+system/core/fs_mgr/libdm/dm_target.cpp               发 iv_offset_ 而不是写死的 0
+system/vold/MetadataCrypt.cpp                        从 ro.crypto.metadata.iv_offset 取值（默认 0）
+```
+
+设备树侧（不在本目录，但配套）：`device.mk` 里 `ro.crypto.metadata.iv_offset=25874496`，
+`recovery.fstab` 的 /data 行用 v2 格式（`fileencryption=ice:aes-256-cts:v2` + `metadata_encryption=aes-256-xts:wrappedkey_v0`）。
+
+### 应用方式
+
+这个补丁**跨两棵树**，要分两次打：
+
+```bash
+cd ~/workdir/TWRP-Test/system/core
+git apply --include='fs_mgr/libdm/*' /path/to/0002-libdm-restore-the-iv-offset.patch
+cd ~/workdir/TWRP-Test/system/vold
+git apply --include='MetadataCrypt.cpp' /path/to/0002-libdm-restore-the-iv-offset.patch
+```
+
+### 结果（真机确认）
+
+```
+$ /tmp/dmctl table userdata
+0-469200792: default-key, aes-xts-plain64 - 25874496 8:9 0 4 allow_discards ... wrappedkey_v0
+
+$ dd if=/dev/block/mapper/userdata bs=1 skip=1024 count=8 | od -A d -t x4
+0000000    f2f52010    000d0001        <- F2FS magic
+
+$ mount | grep '/data '
+/dev/block/dm-6 on /data type f2fs (rw,...)
+内核: F2FS-fs (dm-6): Mounted with checkpoint version = 13d080cd
+```
+
+`25874496` 是**这台设备**的值（从它自己的 dm 表读来的）；换机器要重新读。
+另外 `MetadataCrypt.cpp` 那段是**临时调试接口**，长期方案应当是让 libdm 把这个参数作为正常接口暴露出来。
