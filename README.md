@@ -1538,23 +1538,21 @@ TWRP 侧机理（`bootable/recovery/partitionmanager.cpp`）：`Setup_Super_Devi
 
 FBE 密钥存储，包装密钥经 keymaster 处理。**D2：本行在运行时并不生效**（见下面 /data 的 D2 结论）。留在这里是为了让静态定义与原厂 recovery 镜像的 `recovery.fstab` 保持可比对（gatekeeper / keydirectory 的语义没变）。
 
-#### /data：D2 实测结论（本行挂载选项在运行时被覆盖）
+#### /data：D2 的现状（t10 已改变它）
 
-本行的**挂载选项与 fs_mgr 标志在运行时不会生效**。TWRP 在 recovery 模式下先解析 `/etc/recovery.fstab`，再把厂商 fstab 复制成 `/etc/additional.fstab` 并**只**用它重新定义 `/data` 与 `/metadata`（`partitionmanager.cpp:365-380` 的 `parse_userdata` 分支会先 `std::erase` 掉同名条目再重建，其余行 continue 跳过）。实测证据：
+**t10 之前**：本行的挂载选项与 fs_mgr 标志在运行时**不会生效**。TWRP 在 recovery 模式下先解析 `/etc/recovery.fstab`，再把厂商 fstab 复制成 `/etc/additional.fstab` 并**只**用它重新定义 `/data` 与 `/metadata`（`partitionmanager.cpp:365-380` 的 `parse_userdata` 分支会先 `std::erase` 掉同名条目再重建，其余行 continue 跳过）。当时的实测证据：
 
 * `raw/201-recovery-log.out:89-101`：`GetFstabPath` → `/vendor/etc/fstab.default` → `I:Reading /etc/additional.fstab` → 重新 `I:Processing '/metadata' / '/data'`；
 * `raw3/931-additional-fstab.out`：`/etc/additional.fstab` 与 `stock/vendor/etc/fstab.default` 逐行相同；`raw/015-getprop.out`：`fstab.additional=1`；
-* `/data` 的最终 `Mount_Options` = `discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt` —— 与 additional.fstab 的 /data 行逐项吻合。本文件这一行**没有** inlinecrypt，而且带 `sysfs_path`（TWRP 把它放进 `ignored_mount_items`，永远不进 Mount_Options），即最终定义来自厂商 fstab。
+* `/data` 当时的最终 `Mount_Options` = `discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt` —— 与 additional.fstab 的 /data 行逐项吻合，即最终定义来自厂商 fstab。
 
-所以对 `/data`、`/metadata` 的任何 fstab 改动在真机上都是「只改文档」。要让本文件成为唯一来源，必须重新构建并在 `BoardConfig.mk` 打开上游开关（属 platform 范围，本次未改）：
+**t10 起**：`BoardConfig.mk` 打开了 `TW_SKIP_ADDITIONAL_FSTAB := true`，厂商 fstab 整份不再参与，
+本文件成为 `/data` 与 `/metadata` 的唯一来源，并且 `/data` 行已改写为 v2 加密选项格式。
+完整推导、副作用与风险见本文档「真机复验（t10）」。
 
-```make
-TW_SKIP_ADDITIONAL_FSTAB := true
-```
+开关位置：`vendor/twrp/config/BoardConfigSoong.mk:321` → `soong_config_set_bool(..., skip_additional_fstab, ...)` → `vendor/twrp/build/soong/Android.bp:400-401` 的 `-DTW_SKIP_ADDITIONAL_FSTAB`；`partitionmanager.cpp:432` 的 `#ifndef` 分支走 `else`，打印 `Skipping Additional Fstab Processing` 并置 `fstab.additional=0`。
 
-开关位置：`vendor/twrp/config/BoardConfigSoong.mk:321` → `soong_config_set_bool(..., skip_additional_fstab, ...)`；`partitionmanager.cpp:432` 有 `#ifndef` 分支，开启后 `fstab.additional=0` 且日志打印 `Skipping Additional Fstab Processing`。副作用：开启后 `/data` 的 `Mount_Options` 不再带 `inlinecrypt`（本行没有它）。
-
-本次刻意**不**把本行改成厂商 fstab 的副本：那会让静态定义与「当前真实运行路径」混在一起，改动与否都不影响运行期行为，只会掩盖 D2 本身。
+因此上面那条 `inlinecrypt` 现在必须由本文件自己写（已补上）。
 
 #### 裸块证据的边界（避免过度断言）
 
@@ -1855,3 +1853,144 @@ $ echo $?
 ```
 
 它输出的四个 `<fqname>` 正是要的东西：`android.hidl.manager@1.2::IServiceManager/default`、`android.hidl.token@1.0::ITokenManager/default`、`android.hardware.keymaster@4.0::IKeymasterDevice/default`、`android.hardware.gatekeeper@1.0::IGatekeeper/default`，全部 `hwbinder`。
+
+---
+
+### 真机复验（t10）：把 /data 的加密选项从 v1 改成 v2，并让设备树 fstab 真正生效
+
+#### 为什么必须改：`PRODUCT_SHIPPING_API_LEVEL` 的一个隐性副作用
+
+`vold` 选哪条 metadata 解密分支，不是由 metadata 选项自己决定的，而是由 **fileencryption 选项解析出来的 `version`** 决定的
+（`system/vold/MetadataCrypt.cpp:336-356`）：
+
+```cpp
+if (options_format_version == 1) {
+    if (!data_rec->metadata_encryption_options.empty()) {
+        LOG(ERROR) << "metadata_encryption options cannot be set in legacy mode";
+        return false;
+    }
+    options.use_legacy_options_format = true;
+    if (is_metadata_wrapped_key_supported()) options.use_hw_wrapped_key = true;
+    options.set_dun = android::base::GetBoolProperty("ro.crypto.set_dun", false);
+} else if (options_format_version == 2) {
+    if (!parse_options(data_rec->metadata_encryption_options, &options)) return false;
+} else { ... return false; }
+```
+
+而 `version` 来自 `libfscrypt`（`system/extras/libfscrypt/fscrypt.cpp:212`）：
+
+```cpp
+// Default to v2 after Q
+options->version = first_api_level > __ANDROID_API_Q__ ? 2 : 1;
+```
+
+**`first_api_level` 就是 `ro.product.first_api_level`，而它由本设备树的 `PRODUCT_SHIPPING_API_LEVEL := 30` 生成。**
+于是出现一个谁都没打算要的后果：我们把 vendor 侧的 API level 如实写成 30，却顺手把 vold 推到了 v2 分支，
+而本设备树的 fstab 是按 v1 写的（没有 `metadata_encryption=`）——v2 分支遇到空的 `metadata_encryption_options` 会**直接失败**，
+连 dm 设备都不会建：`parse_options("")` → `Invalid metadata encryption option`。
+
+用 `tools/sim_crypto_options.py` 把这条链跑一遍（它复刻了上面三段逻辑）：
+
+```
+$ python3 tools/sim_crypto_options.py <旧 fstab>
+== first_api_level=30 ==
+   fileencryption      : ice
+   metadata_encryption : (absent)
+   -> options_format_version = 2
+   -> v2 branch: parse_options FAILED (Invalid metadata encryption option: '') -> no dm device at all
+
+== first_api_level=29 ==
+   fileencryption      : ice
+   metadata_encryption : (absent)
+   -> options_format_version = 1
+   legacy=True set_dun=False hw_wrapped=True cipher=AES-256-XTS
+   dm table: AES-256-XTS <KEY> /dev/block/sda9 0 1 wrappedkey_v0
+```
+
+**这张表也顺带解释了 t9 那个我一直没能闭合的矛盾**：旧 fstab 只有在 `first_api_level <= 29` 时才走得通，
+而 t9 的日志里确实出现了内核的 `default-key: Invalid keysize`——那需要一个已经建起来的 dm 设备。
+也就是说那个进程里 `first_api_level` 是 29，不是 30。我无法解释这个差异
+（`prop.default` 与 `getprop` 都显示 30），所以**不把它当作已结论**；
+但无论它到底是几，下面的改法都让这个依赖彻底消失。
+
+#### 改法
+
+`recovery/root/system/etc/recovery.fstab` 的 /data 行改成 v2 格式：
+
+```
+fileencryption=ice              ->  fileencryption=ice:aes-256-cts:v2
+-wrappedkey                         +etadata_encryption=aes-256-xts:wrappedkey_v0
+                                    +inlinecrypt
+```
+
+* **`:v2` 是显式写的**，所以版本不再依赖 `ro.product.first_api_level`；
+* `metadata_encryption=` 是 v2 分支的**必需项**，同时也是让 `use_hw_wrapped_key` 为真、
+  并让 `use_legacy_options_format` 保持 false 的那一项——**后者正是 libdm 发出 `wrappedkey_v0` 的条件**；
+* 去掉裸 `wrappedkey` 标志：v2 下包装密钥由 `metadata_encryption=...:wrappedkey_v0` 表达，
+  `is_metadata_wrapped_key_supported()` 只在 v1 分支被读；
+* 加上 `inlinecrypt`：挂载选项从此由本文件负责（厂商 fstab 不再参与，见下）。
+
+改完之后的表：
+
+```
+AES-256-XTS <KEY> 0 /dev/block/sda9 0 4 allow_discards sector_size:4096 iv_large_sectors wrappedkey_v0
+```
+
+**`wrappedkey_v0` 是原生发出来的**，不依赖 `platform-patches/` 那个 libdm 补丁了
+（补丁留着无害：它只在 legacy 分支加标记，而 v2 不走那条路）。
+
+#### 让它真正生效：`TW_SKIP_ADDITIONAL_FSTAB`
+
+只改 `recovery.fstab` 是**没有用的**。TWRP 在 recovery 模式下会把厂商 fstab 复制成 `/etc/additional.fstab`，
+再重新解析一遍，`/data` 与 `/metadata` 的最终定义来自那一份（`partitionmanager.cpp:430-445`）：
+
+```cpp
+#ifndef TW_SKIP_ADDITIONAL_FSTAB
+            if (TWFunc::Find_Fstab(Fstab_Filename)) {
+                TWFunc::copy_file(Fstab_Filename, additional_fstab, 0600, false);
+                Fstab_Filename = additional_fstab;
+```
+
+我原本想用「在 ramdisk 里预置一份自己的 `/etc/additional.fstab`」绕过它，但那条路不通：
+`TWFunc::copy_file()` 的第 4 个参数是 `mount_paths` 而**不是** overwrite，函数体里无条件截断目标文件
+（`twrp-functions.cpp:675-698`），预置的那份一定会被覆盖。
+
+所以只能打开开关（在 `BoardConfig.mk` 里，属于设备树范围）：
+
+```make
+TW_SKIP_ADDITIONAL_FSTAB := true
+```
+
+它经 `vendor/twrp/config/BoardConfigSoong.mk:321` → `Android.bp:400-401` 变成编译期宏 `-DTW_SKIP_ADDITIONAL_FSTAB`。
+
+**副作用（如实列出）**：厂商 fstab 整份不再被读，于是
+
+* `/storage/sdcard1`、`/storage/usbotg` 两条 `voldmanaged=` 条目消失——B2 本来就是坏的，
+  且 `twrp.flags` 里有对应的 `/sdcard1`、`/usb_otg`，所以不构成回归；
+* `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware` 三条消失——它们本来就会被 TWRP 丢弃（R2），
+  现在连 `Found an additional entry for ...` 的噪声也没有了；
+* `/data` 的挂载选项不再由厂商 fstab 提供，所以上面给 /data 补了 `inlinecrypt`；
+* `/metadata` 的定义改由本文件提供（原来是厂商那份）。
+
+#### 风险：**IV 粒度可能不匹配，这是本次最不确定的一点**
+
+v1 与 v2 的 dm 表不只是多一个 `wrappedkey_v0`，v2 还多了 `sector_size:4096` 与 `iv_large_sectors`
+（`system/core/fs_mgr/libdm/dm_target.cpp` 的 `GetParameterString`）。这两个参数影响 IV/DUN 的推导粒度。
+
+如果现有 /data 是在**legacy（512 字节粒度）**下写入的，那么换到 v2 的 4096 粒度可能仍然解不出来——
+不是数据损坏（错 IV 只会让 superblock 变乱码，挂载失败），而是这一跳还是过不去。
+
+原厂系统本身用的是哪一档，取决于原厂 `ro.product.first_api_level`：
+若为 29 则原厂走 v1（legacy 粒度），那么 v2 就有粒度不匹配的风险。**这一点无法离线确定，只能靠刷入验证。**
+
+两条路线各自的判据：
+
+| 路线 | 表 | 预期 |
+|---|---|---|
+| 本节的 v2 fstab | `... 0 4 allow_discards sector_size:4096 iv_large_sectors wrappedkey_v0` | 若是粒度不匹配，内核不再报 `Invalid keysize`，但 F2FS magic 仍然不对 |
+| 回退到 v1 + `platform-patches/` 的 libdm 补丁 | `AES-256-XTS <KEY> /dev/block/sda9 0 1 wrappedkey_v0` | 与 legacy 粒度一致，参数上最接近原厂（如果原厂是 v1） |
+
+两者的判据都很明确：`/data` 挂上 + `recovery.log` 出现
+`Successfully decrypted metadata encrypted data partition`。
+
+**尚未在真机确认。**

@@ -118,6 +118,8 @@ TARGET_USERIMAGES_USE_EXT4 := true
 TARGET_USERIMAGES_USE_F2FS := true
 # TWRP 先找 /etc/twrp.fstab，再找 /etc/recovery.fstab
 TARGET_RECOVERY_FSTAB := $(DEVICE_PATH)/recovery/root/system/etc/recovery.fstab
+# 让上面的 fstab 成为 /data 与 /metadata 的唯一来源（否则厂商 additional.fstab 会覆盖）
+TW_SKIP_ADDITIONAL_FSTAB := true
 
 # ---- Recovery ramdisk 可执行位：构建期修不了，由 init 启动时 chmod
 # 不要在这里加 BOARD_RECOVERY_IMAGE_PREPARE chmod（实测无效，理由见 README）

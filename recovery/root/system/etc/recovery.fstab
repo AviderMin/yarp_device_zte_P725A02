@@ -7,7 +7,8 @@
 # 设备节点：bootdevice = /dev/block/platform/soc/1d84000.ufshc（UFS）；
 # by-name 符号链接；A/B 分区为 <name>_a/<name>_b，故需 slotselect。
 #
-# 注意：/data 与 /metadata 两行在运行时会被厂商 additional.fstab 覆盖（D2）。
+# 本文件是唯一来源：BoardConfig.mk 已打开 TW_SKIP_ADDITIONAL_FSTAB，
+# 厂商 additional.fstab 不再参与，/data 与 /metadata 由这里定义（v2 加密选项格式）。
 # 注意：/mnt/vendor/persist 是三级挂载点，TWRP 的 Get_Root_Path() 会截断成 /mnt。
 #
 #<src>                                                  <mnt_point>            <type>  <mnt_flags and options>                 <fs_mgr_flags>
@@ -19,13 +20,13 @@ product                                                 /product               e
 vendor                                                  /vendor                ext4    ro,barrier=1,discard                     wait,slotselect,avb,logical,first_stage_mount
 
 # ---- Metadata：FBE 密钥存储，包装密钥经 keymaster
-# 运行时本行不生效（见 README 的 D2 结论），保留是为了与原厂 fstab 可比对。
 /dev/block/bootdevice/by-name/metadata                      /metadata              ext4    noatime,nosuid,nodev,discard             wait,check,formattable,wrappedkey
 
-# ---- Userdata：FBE + ICE + wrappedkey
-# 运行时本行的挂载选项与 fs_mgr 标志不生效，最终定义来自厂商 additional.fstab（D2）。
+# ---- Userdata：FBE + ICE + wrappedkey，v2 加密选项格式
+# fileencryption 的 :v2 显式钉住版本，不依赖 ro.product.first_api_level；
+# metadata_encryption 是 v2 分支的必需项，也是让 libdm 发出 wrappedkey_v0 的那一项。
 # 绝对不要格式化 /data：先取证再判断，依据见 README。
-/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier latemount,wait,check,formattable,fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,quota,reservedsize=128M,sysfs_path=/sys/devices/platform/soc/1d84000.ufshc,checkpoint=fs
+/dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,wait,check,formattable,quota,reservedsize=128M,fileencryption=ice:aes-256-cts:v2,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,checkpoint=fs
 
 # ---- 持久化固件/属性
 # 三级挂载点，TWRP 找不到（Get_Root_Path 截断），见 README 的 t8 末节。
