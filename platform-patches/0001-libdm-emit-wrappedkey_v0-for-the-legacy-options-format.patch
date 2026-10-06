@@ -1,0 +1,35 @@
+diff --git a/fs_mgr/libdm/dm_target.cpp b/fs_mgr/libdm/dm_target.cpp
+index b5cc9aa..50f82f3 100644
+--- a/fs_mgr/libdm/dm_target.cpp
++++ b/fs_mgr/libdm/dm_target.cpp
+@@ -281,12 +281,29 @@ std::string DmTargetDefaultKey::GetParameterString() const {
+         extra_argv.emplace_back("allow_discards");
+         extra_argv.emplace_back("sector_size:4096");
+         extra_argv.emplace_back("iv_large_sectors");
+-        if (is_hw_wrapped_) extra_argv.emplace_back("wrappedkey_v0");
+     }
++    // wrappedkey_v0 tells the kernel that the key argument is a hardware-wrapped
++    // blob rather than raw key material of the cipher's key size, and the kernel
++    // rejects the wrong one with "default-key: Invalid keysize".  It is required
++    // on BOTH option formats: a device that selects the legacy format (v1 fstab,
++    // "fileencryption=ice") while also using a wrapped metadata key -- which is
++    // what fs_mgr_flags.wrapped_key on the /metadata entry means, see
++    // is_metadata_wrapped_key_supported() in system/vold/FsCrypt.cpp -- still
++    // hands the kernel the output of exportWrappedStorageKey().  Emitting it only
++    // in the non-legacy branch, as upstream does, drops the marker on exactly
++    // that combination.
++    if (is_hw_wrapped_) extra_argv.emplace_back("wrappedkey_v0");
+     if (!extra_argv.empty()) {
+         argv.emplace_back(std::to_string(extra_argv.size()));
+         argv.insert(argv.end(), extra_argv.begin(), extra_argv.end());
+     }
++    // TEMPORARY INSTRUMENTATION: one line per default-key table, no key material.
++    // Remove once the ZTE P725A02 metadata decryption is confirmed working; see
++    // platform-patches/ in the device tree for the context.
++    LOG(INFO) << "default-key: legacy=" << use_legacy_options_format_
++              << " hw_wrapped=" << is_hw_wrapped_ << " set_dun=" << set_dun_
++              << " key_len=" << key_.size() << " argc=" << argv.size()
++              << " extra=" << (extra_argv.empty() ? "-" : android::base::Join(extra_argv, ","));
+     return android::base::Join(argv, " ");
+ }
+ 

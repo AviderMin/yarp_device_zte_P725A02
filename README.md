@@ -16,7 +16,7 @@
 | 静态证据核对 | 通过 |
 | 编译验证 | **通过**（`mka recoveryimage` 成功产出 recovery.img） |
 | 镜像结构核对 | **通过**（镜像头、内核、DTB、ramdisk 内容逐项核对） |
-| FBE / metadata 解密 | **支持，尚未在修好后的镜像上复验**：ramdisk 内置 qseecomd/keymaster 4.0/gatekeeper 1.0 + keymaster TA；t7 修掉可执行位与 VINTF manifest，t8 补齐 13 个只在 `dlopen` 里出现的库（见「真机复验（t7）」「（t8）」）。整条链已在真机上起齐（keymaster/gatekeeper/keystore2 全部 running，`keystore.crash_count=0`），只差一次刷入后的开机解密 |
+| FBE / metadata 解密 | **接近可用，尚未在真机确认**：t7 修可执行位与 VINTF manifest，t8 补齐 13 个 dlopen 依赖，t9 定位并修掉一处 **platform** 缺陷（libdm 在 legacy 格式下不发 `wrappedkey_v0`，见 `platform-patches/`）。整条链已起齐、密钥已被 keymaster 成功解开，只差 dm-default-key 那一跳的实机确认 |
 | 实机验证（显示 / 触摸 / 挂载 / 引导） | **部分进行**：显示、触摸、logical 分区、`/metadata` 均正常；`/data` 仍无法挂载，但 t7 已在真机上把根因定到 "keymaster HAL 从未启动"（不是分区损坏），修复待刷入复验 |
 | TWRP 设置持久化 | **已知缺陷，本轮只定性未修**：`/mnt/vendor/persist` 是三级挂载点，被 `Get_Root_Path()` 截成 `/mnt` 而永远挂不上，`.twrp_settings` 因此写在 ramdisk 上、重启即丢（见「真机复验（t7）」末节） |
 
@@ -681,6 +681,113 @@ dmesg 里能看到 t7 设计的那个闸门原样生效：
 
 `tools/verify_decrypt_prereqs.mjs` 新增 `prereq/dlopen-closure` 断言它的结论，
 所以这个缺口不会再次静默通过。
+
+### 真机复验（t9）：密钥解开了，但 dm-default-key 建不起来（platform 缺陷）
+
+t8 修好之后，整条加密链**第一次完整起来**：
+
+```
+qseecomd=running   listeners=true    keymaster=running
+gatekeeper=running keystore2=running keystore.crash_count=0
+```
+
+但 `/data` 依旧不挂。而且这次可以确定**不是竞态**：重启 recovery 服务、让它在 HAL 全部就绪
+之后重新跑一次 `Decrypt_Data()`，结果一模一样。
+
+#### 先把日志弄出来
+
+vold 的 `LOG()` 输出一直看不到，因为 recovery 里**没有 logd**（`/dev/socket/logdw` 不存在、
+也没有 logcat），而 liblog 在 Android 上只写 logd、**没有 stderr 回退**
+（`system/logging/liblog/logger_write.cpp:170`：`__ANDROID__` 下默认 logger 是
+`__android_log_logd_logger`）。
+
+但 liblog 留了一个口子：`ro.log.file_logger.path`（`logger_write.cpp:287-296`）。
+设上它，liblog 就把每条日志追加写进那个文件：
+
+```
+adb shell setprop ro.log.file_logger.path /tmp/liblog_recovery.txt
+adb shell setprop ctl.restart recovery
+```
+
+#### 日志说的第一件事：加密栈本身已经是好的
+
+```
+MetadataCrypt.cpp:289 fscrypt_mount_metadata_encrypted: /data encrypt: 0 format: 0 with f2fs block device: /dev/block/sda9
+MetadataCrypt.cpp:128 metadata_key_dir/key: /metadata/vold/metadata_encryption/key
+KeyUtil.cpp:302       Key exists, using: /metadata/vold/metadata_encryption/key
+KeyStorage.cpp:607    Retrieving key from keymaster
+KeyStorage.cpp:337    reading blob_file: .../keymaster_key_blob
+KeyStorage.cpp:366    KeyMint upgraded .../keymaster_key_blob for this operation only
+```
+
+`Retrieving key from keymaster` 之后没有再报错——**硬件包装的密钥被成功解开了**。t7/t8 修的那些
+（可执行位、VINTF manifest、dlopen 依赖）到此全部兑现。
+
+#### 第二件事：卡在 dm-default-key
+
+```
+dm.cpp:332             DM_TABLE_LOAD failed: Invalid argument
+MetadataCrypt.cpp:195  Could not create default-key device userdata
+MetadataCrypt.cpp:373  create_crypto_blk_dev failed in mountFstab
+```
+
+内核把原因写得更直白：
+
+```
+device-mapper: table: 253:6: default-key: Invalid keysize
+device-mapper: ioctl: error adding target to table
+```
+
+**密钥长度不对**：送给内核的是 `exportWrappedStorageKey()` 产出的硬件包装密钥，
+却没有同时告诉内核它是包装过的。
+
+#### 根因：libdm 只在非 legacy 分支发 `wrappedkey_v0`
+
+`system/core/fs_mgr/libdm/dm_target.cpp`：
+
+```cpp
+if (use_legacy_options_format_) {
+    if (set_dun_) extra_argv.emplace_back("set_dun");
+} else {
+    extra_argv.emplace_back("allow_discards");
+    extra_argv.emplace_back("sector_size:4096");
+    extra_argv.emplace_back("iv_large_sectors");
+    if (is_hw_wrapped_) extra_argv.emplace_back("wrappedkey_v0");   // 只有这里发
+}
+```
+
+本机**两个条件同时成立**，于是标记被丢掉：
+
+* 走 legacy 格式：fstab 里是 `fileencryption=ice`（没有 `:v2` 后缀）。
+  `DmTargetDefaultKey::Valid()` 是旁证：`if (!use_legacy_options_format_ && !set_dun_) return false;`
+  ——非 legacy 且 `set_dun` 为假会被 libdm 自己拒掉，而报错的是**内核**。
+* 同时 `use_hw_wrapped_key` 为真：`is_metadata_wrapped_key_supported()`
+  （`system/vold/FsCrypt.cpp:381`）读的就是 `/metadata` 条目上的 `wrappedkey` 标志。
+
+内核侧完全支持：本机内核（4.19.157-perf / msm-4.19）里有 `default-key`、`wrappedkey_v0`、
+`set_dun`、`allow_discards`、`iv_large_sectors`、`sector_size`，`drivers/md/dm-default-key.c` 也在。
+缺的只是 libdm 没把标记发出去。
+
+#### 修法：一处 platform 补丁
+
+把 `wrappedkey_v0` 从 `else` 里挪出来，两种格式都发。这也应当是原厂 Android 11 的行为，
+否则原厂无法在同样的「v1 fstab + wrappedkey」组合上启动。补丁与说明见 `platform-patches/`
+（`system/core` 不在设备树里，重新 sync TWRP 源码后需要重新应用）。
+
+补丁用 `git apply --reverse --check` 验证过与工作树逐字一致；它确实进了镜像：
+
+```
+$ gzip -dc ramdisk-recovery.img | cpio -idm system/lib64/libfs_mgr.so
+$ strings -a system/lib64/libfs_mgr.so | grep 'default-key: legacy='
+default-key: legacy=
+```
+
+（`recovery` 二进制本身不含这段代码——它链接的是共享库 `libfs_mgr.so`；一开始查错了文件，
+以为补丁没生效。）
+
+**尚未在真机确认。** 判据：`/data` 挂上、`recovery.log` 出现
+`Successfully decrypted metadata encrypted data partition`、内核不再打印
+`default-key: Invalid keysize`。
 
 ### keystore2 启动顺序（t4：唯一一次解密尝试的胜负手）
 
