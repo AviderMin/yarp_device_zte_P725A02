@@ -73,6 +73,17 @@ if (use_legacy_options_format_) {
 
 ---
 
+## 补丁清单
+
+本目录只需要打 **一个** 补丁：
+
+    0002-libdm-and-vold-metadata-decryption.patch
+
+它做两件事：让 libdm 在 legacy 分支也发出 wrappedkey_v0；把 iv_offset 从硬编码 0 改回可设置（后者才是最终让 /data 解开的那一处）。
+
+早先单独存在过一个 0001-...wrappedkey_v0...patch，它已被这份补丁**完整包含**——我当时用 git diff -- fs_mgr/libdm/ 生成新补丁，把旧的改动一起带进来了，两个都打会冲突。已删除。
+
+---
 ## 0002 — 把 iv_offset 还回来（这是最终让 /data 解开的那一处）
 
 **症状**：dm 设备建得起来、内核接受密钥、dm 层确实在变换数据，但明文全是噪声：
@@ -116,9 +127,9 @@ system/vold/MetadataCrypt.cpp                        从 ro.crypto.metadata.iv_o
 
 ```bash
 cd ~/workdir/TWRP-Test/system/core
-git apply --include='fs_mgr/libdm/*' /path/to/0002-libdm-restore-the-iv-offset.patch
+git apply --include='fs_mgr/libdm/*' /path/to/0002-libdm-and-vold-metadata-decryption.patch
 cd ~/workdir/TWRP-Test/system/vold
-git apply --include='MetadataCrypt.cpp' /path/to/0002-libdm-restore-the-iv-offset.patch
+git apply --include='MetadataCrypt.cpp' /path/to/0002-libdm-and-vold-metadata-decryption.patch
 ```
 
 ### 结果（真机确认）
