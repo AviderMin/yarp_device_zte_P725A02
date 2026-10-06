@@ -41,4 +41,5 @@ log/
 tools/*
 !tools/check_comments_only.py
 !tools/verify_all.sh
+!tools/sim_crypto_options.py
 .agent-teams/
