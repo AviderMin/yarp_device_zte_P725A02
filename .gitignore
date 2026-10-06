@@ -35,5 +35,10 @@ google-services.json
 *.hprof
 stock/
 log/
-tools/
+# tools/ 里多数脚本含有本机绝对路径，保持忽略；
+# 下面两个是可移植的复核工具，被 README 与提交信息引用，因此纳入版本控制。
+# 注意必须写成 tools/* 而不是 tools/ —— 目录整体被排除时，! 规则不会生效。
+tools/*
+!tools/check_comments_only.py
+!tools/verify_all.sh
 .agent-teams/
