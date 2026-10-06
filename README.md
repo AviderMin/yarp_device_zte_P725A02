@@ -1994,3 +1994,95 @@ v1 与 v2 的 dm 表不只是多一个 `wrappedkey_v0`，v2 还多了 `sector_si
 `Successfully decrypted metadata encrypted data partition`。
 
 **尚未在真机确认。**
+
+---
+
+### 真机复验（t12）：iv_offset —— Android 16 的 libdm 把它丢掉了
+
+**这是最终让 `/data` 解开的那一处。**
+
+#### 症状与前面几轮的区别
+
+不再是 `Invalid keysize`，也不再是「根本没建 dm 设备」：表合法、内核接受、`/dev/block/mapper/userdata` 存在、
+dm 层确实在变换数据（裸 `sda9` 与解密视图内容不同），**但明文是噪声**：
+
+```
+F2FS-fs (dm-6): Magic Mismatch, valid(0xf2f52010) - read(0x23aff3d6)
+```
+
+#### 决定性的一步：读原厂自己的表
+
+设备能正常进系统（`/data` 正常挂载）说明**密钥和数据都是好的**——这条排除了我从 t9 起反复怀疑的
+「/metadata 与 /data 不同步」。而系统镜像里**自带 `dmctl`**（`/system/bin/dmctl`，需要 `su -c`）：
+
+```
+$ su -c 'dmctl table userdata'
+原厂: aes-xts-plain64 - 25874496 8:9 0 3 allow_discards sector_size:4096 iv_large_sectors
+我们: aes-xts-plain64 - 0        8:9 0 4 allow_discards sector_size:4096 iv_large_sectors set_dun
+```
+
+密文名一致；**真正的差异是第三个字段**——`iv_offset`。
+
+#### 根因
+
+`dm-default-key` 对某个扇区的 IV 取自 `(sector + iv_offset)`。数据是用 **25874496** 写的，
+而我们用 **0** 去读，于是**每个块的 IV 都是错的**。表本身完全合法，所以内核一声不吭。
+
+而 0 是**被写死的**：
+
+```cpp
+// Android 11：发构造函数传进来的 offset
+// Android 16：参数没了（第 6 个变成了 start_sector），这一行变成常量
+if (!use_legacy_options_format_) argv.emplace_back("0");  // iv_offset
+```
+
+全树搜索 `iv_offset` **只有这一处硬编码**，也只有 `MetadataCrypt.cpp:174` 一处构造 `DmTargetDefaultKey`。
+**所以无论 fstab 怎么调都不可能修好——我前面五版都在参数空间里找一个被代码丢掉的东西。**
+
+#### 修法
+
+`platform-patches/0002-libdm-and-vold-metadata-decryption.patch`（跨两棵树，分两次 `git apply --include=`）：
+
+```
+dm_target.h        + SetIvOffset() 与成员 iv_offset_
+dm_target.cpp      发 iv_offset_ 而不是写死的 0
+MetadataCrypt.cpp  从 ro.crypto.metadata.iv_offset 取值（默认 0）
+```
+
+设备树侧：`device.mk` 里 `ro.crypto.metadata.iv_offset=25874496`；`recovery.fstab` 的 /data 行用 v2 格式
+（`fileencryption=ice:aes-256-cts:v2` + `metadata_encryption=aes-256-xts:wrappedkey_v0`），
+这样这一版相对「上一个被内核接受但出噪声」的版本**只差 iv_offset 一个变量**。
+
+#### 真机判据（全部满足）
+
+```
+$ /tmp/dmctl table userdata
+0-469200792: default-key, aes-xts-plain64 - 25874496 8:9 0 4 ... wrappedkey_v0
+                                    ^^^^^^^^ 与原厂一致
+
+$ dd if=/dev/block/mapper/userdata bs=1 skip=1024 count=8 | od -A d -t x4
+0000000    f2f52010    000d0001        <- F2FS magic
+
+$ mount | grep '/data '
+/dev/block/dm-6 on /data type f2fs (rw,...)
+内核: F2FS-fs (dm-6): Mounted with checkpoint version = 13d080cd
+```
+
+`ls /data` 输出完整的 Android 数据目录（adb、anr、apex、app、dalvik-cache、media、misc、user…）。
+
+#### 我在这一轮之前说错的三件事
+
+1. **IV 粒度**：t10 把失败归因于 `sector_size:4096`/`iv_large_sectors`，还专门去掉它们——方向是反的。
+2. **`set_dun`**：t11 断定它从没被发出去过并当作病因，实际它只是个无关的伴随项。
+3. **密文名**：在 `tools/sim_crypto_options.py` 里凭记忆把 `aes-256-xts` 映射成 `AES-256-XTS`。
+   那是**假设不是阅读**——真实 kernel name 是 `aes-xts-plain64`，两边本来就一致。
+
+共同点：**在一个未经验证的模型里推理，而不是去测量。** 真正解决问题的是两次测量——
+进系统后读到的原厂 dm 表，以及内核字符串里那几行 `blk-crypto`/`sector_size` 线索。
+
+#### 遗留
+
+* `MetadataCrypt.cpp` 里从属性读 iv_offset 是**调试接口**，不是长期形态；正确的做法是让 libdm 把这个参数
+  作为正常接口暴露出来。
+* `25874496` 是**这台设备**的值（从它自己的 dm 表读来的）；换机器要重新读。
+* 当前已刷入的镜像里还留着那条临时 `LOG(INFO)`（源码里已删）——它只写日志、不可能影响 dm 表。
