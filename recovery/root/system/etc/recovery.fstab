@@ -9,7 +9,7 @@
 #
 # 本文件是唯一来源：BoardConfig.mk 已打开 TW_SKIP_ADDITIONAL_FSTAB，
 # 厂商 additional.fstab 不再参与，/data 与 /metadata 由这里定义（v2 加密选项格式）。
-# 注意：/mnt/vendor/persist 是三级挂载点，TWRP 的 Get_Root_Path() 会截断成 /mnt。
+# 注意：本文件里所有挂载点都必须是一级路径——Get_Root_Path() 只保留第一段。
 #
 #<src>                                                  <mnt_point>            <type>  <mnt_flags and options>                 <fs_mgr_flags>
 
@@ -29,8 +29,9 @@ vendor                                                  /vendor                e
 /dev/block/bootdevice/by-name/userdata                      /data                  f2fs    noatime,nosuid,nodev,discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt latemount,wait,check,formattable,quota,reservedsize=128M,fileencryption=ice:aes-256-cts:v2,wrappedkey,keydirectory=/metadata/vold/metadata_encryption,metadata_encryption=aes-256-xts:wrappedkey_v0,checkpoint=fs
 
 # ---- 持久化固件/属性
-# 三级挂载点，TWRP 找不到（Get_Root_Path 截断），见 README 的 t8 末节。
-/dev/block/bootdevice/by-name/persist                       /mnt/vendor/persist    ext4    noatime,nosuid,nodev,barrier=1           wait,check,formattable
+# 必须是【一级】挂载点：Get_Root_Path() 只保留路径第一段，
+# /mnt/vendor/persist 会被截成 /mnt 而永远找不到（见 README t13）。
+/dev/block/bootdevice/by-name/persist                       /persist               ext4    noatime,nosuid,nodev,barrier=1           wait,check,formattable
 
 # ---- 控制块
 /dev/block/bootdevice/by-name/misc                          /misc                  emmc    defaults                                 defaults
