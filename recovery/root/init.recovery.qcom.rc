@@ -24,178 +24,54 @@
 # OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #
-# Recovery init for ZTE P725A02 (lito, msm-4.19).
-#
-# This file is the ONE piece kept from the generator template: it already
-# matched the stock recovery ramdisk's own init.recovery.qcom.rc byte for byte
-# (same backlight write, same USB controller property, same bootdevice symlink).
-# Everything else in recovery/root was restructured to the paths TWRP 16
-# actually reads:
-#   system/etc/recovery.fstab   (TARGET_RECOVERY_FSTAB, copied by core/Makefile)
-#   system/etc/twrp.flags       (read as /etc/twrp.flags)
-#   system/etc/ueventd.rc       (first path ueventd parses in recovery mode)
-#   init.recovery.usb.rc        (USB gadget + ADB/MTP triggers; overrides the
-#                                upstream file of the same name at the ramdisk root)
-
-# NOTE on paths: TWRP's own bootable/recovery/etc/init.rc already does
-#   import /init.recovery.${ro.hardware}.rc   (-> this file, ro.hardware=qcom)
-#   symlink /system/etc /etc                  (so /etc/twrp.fstab,
-#                                              /etc/recovery.fstab and
-#                                              /etc/twrp.flags resolve)
-#   import /init.recovery.usb.rc              (USB gadget setup)
-# This device tree DOES override that last file: recovery/root/init.recovery.usb.rc
-# lands at the ramdisk root and replaces upstream's bootable/recovery/etc/
-# init.recovery.usb.rc (verified on device: /init.recovery.usb.rc md5
-# 8bf681c1486ed9c88efd772b66879a14 == the repo file).  The configfs mtp,adb branch
-# that upstream init.rc does not provide lives there - see that file's header.
-# Only the /system/etc -> /etc symlink is not repeated here.
+# ZTE P725A02 (lito, msm-4.19) recovery init。
+# 详细说明见根目录 README.md「设备树逐文件说明 / recovery/root/init.recovery.qcom.rc」。
 
 on early-init
-    # ------------------------------------------------------------------
-    # QTI crypto services run from the ramdisk, never from /vendor.
-    #
-    # TWRP mounts /vendor only to read the keymaster manifest and the vendor
-    # build.prop, then unmounts it again before it decrypts:
-    #   * partitionmanager.cpp:426 (Process_Fstab, first pass) mounts /vendor
-    #   * partitionmanager.cpp:453-456 / 487-515 (Setup_Fstab_Partitions)
-    #     unmounts it again
-    #   * partitionmanager.cpp:560-561 then sets TW_IS_ENCRYPTED=1 and calls
-    #     Decrypt_Data()
-    # init starts services asynchronously and one action command per main-loop
-    # pass (system/core/init/init.cpp, builtins.cpp do_start), so a
-    # "start <vendor hal>" queued from a /vendor-triggered action races with
-    # that unmount and normally loses: init forks the HAL after /vendor/bin is
-    # already gone.  Without keymaster, Decrypt_Data() cannot unwrap the
-    # hardware-wrapped metadata key, dm-default-key is never created, /data
-    # never mounts, and TW_IS_ENCRYPTED stays 1 -> gui_loadResources()
-    # (gui/gui.cpp:990-999) loads the decrypt page forever, although the device
-    # has no passphrase at all.
-    #
-    # The blobs themselves live in recovery/root/vendor_ramdisk/ (staged by the
-    # device tree, see README "无密码解密" ): qseecomd, the keymaster 4.0 HAL,
-    # the gatekeeper 1.0 HAL and their shared-library closure.  Nothing here
-    # depends on /vendor, on the vendor mapper node or on twrp.super.* props.
-    # ------------------------------------------------------------------
+    # 加密服务跑在 ramdisk 里，不依赖会被 TWRP 卸掉的 /vendor
     mkdir /vendor_ramdisk 0755 root root
-    # ------------------------------------------------------------------
-    # The three crypto binaries must be executable, and NOTHING in the build can
-    # arrange that: they are packed 0644 no matter what their mode on disk is.
-    #
-    # mkbootfs does not preserve the source mode.  Every archive entry goes
-    # through fix_stat() (system/core/mkbootfs/mkbootfs.cpp), which unconditionally
-    # overwrites st_mode with the value from fs_config().  fs_config() looks the
-    # path up in <target_out_path>/etc/fs_config_files and then in the compiled-in
-    # table, and for a regular file that is in neither it returns a hardcoded
-    # default (system/core/libcutils/fs_config.cpp:391-395):
-    #
-    #     *mode = (*mode & S_IFMT) | (dir ? 0755 : 0644);
-    #
-    # vendor_ramdisk/** is in no fs_config table -- the entries that do exist are
-    # for system/bin/*, vendor/bin/* and friends -- so these three are always
-    # 0644 in ramdisk-recovery.img.  Verified in the built image, and it is why
-    # the earlier "chmod the staging directory from BOARD_RECOVERY_IMAGE_PREPARE"
-    # attempt could never have worked: that hook runs before the pack, and the
-    # pack discards the mode.  (Do not re-add it; see BoardConfig.mk.)
-    #
-    # Since the pack cannot carry the bit, init has to set it, and init can:
-    # "chmod" is a live builtin (system/core/init/builtins.cpp:1017 do_chmod,
-    # registered at :1288 as {2, 2}) and init's own README documents its argument
-    # order as `chmod <octal-mode> <path>` (system/core/init/README.md:556) --
-    # mode first, which is easy to get backwards.
-    #
-    # early-init is early enough by a wide margin: these services are started from
-    # `on fs` and from property triggers that can only fire after that, and init
-    # runs actions in queue order.  The ramdisk is a writable rootfs, so the
-    # fchmodat() in do_chmod succeeds.  Without this, every fork fails with
-    #   init: cannot execv('/vendor_ramdisk/bin/qseecomd') ... Permission denied
-    # and the service sits in "restarting" forever.
+    # 构建期无法给这三个二进制加上可执行位，只能在这里补
     chmod 0755 /vendor_ramdisk/bin/qseecomd
     chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
     chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
-    # Trustlet directory.  libkeymasterdeviceutils.so opens the keymaster TA at
-    # the hardcoded /vendor/firmware_mnt/image (that literal string is in the
-    # stock library), so this path must exist before keymaster-4-0 runs and must
-    # never be shadowed by a mount.
+    # libkeymasterdeviceutils.so 硬编码从这个路径打开 keymaster TA
     mkdir /vendor/firmware_mnt 0755 root root
     mkdir /vendor/firmware_mnt/image 0755 root root
-    # /vendor/bin and /vendor/lib64 are bind mounts, not a copy: the linker
-    # resolves the HAL's DT_NEEDED list through the paths the services export as
-    # LD_LIBRARY_PATH, and a future mount of the real vendor partition over
-    # /vendor would hide a copied tree (it cannot hide these: they are what
-    # /vendor shows in the first place).
+    # bind mount 而非拷贝：真实的 vendor 分区挂上来也遮不住它
     mkdir /vendor/bin 0755 root root
     mkdir /vendor/lib64 0755 root root
     mkdir /vendor/lib64/hw 0755 root root
     mount none /vendor_ramdisk/bin /vendor/bin bind
     mount none /vendor_ramdisk/lib64 /vendor/lib64 bind
     mount none /vendor_ramdisk/lib64/hw /vendor/lib64/hw bind
-    # Let the kernel firmware loader find the keymaster trustlet too: it walks
-    # the firmware_directories list in recovery/root/system/etc/ueventd.rc.
+    # 让内核 firmware loader 也找得到 keymaster trustlet
     write /sys/module/firmware_class/parameters/path /vendor/firmware_mnt/image
 
 on init
-    # The stock recovery ramdisk does exactly this (200).
+    # 与原厂 recovery ramdisk 一致
     write /sys/class/backlight/panel0-backlight/brightness 200
     setprop sys.usb.configfs 1
 
 on property:ro.boot.usbcontroller=*
     setprop sys.usb.controller ${ro.boot.usbcontroller}
-    # The stock recovery keeps this commented out because the controller string
-    # already ends in ".dwc3" and sys.usb.controller is consumed verbatim:
-    #   ro.boot.usbcontroller=a600000.dwc3   (stock boot.img-cmdline)
-    # so /sys/class/udc/${ro.boot.usbcontroller} resolves without an extra
-    # ".dwc3" suffix.  Left disabled on purpose.
+    # 原厂同样把下面这条注释掉：controller 串已含 .dwc3，无需再加后缀
     # write /sys/class/udc/${ro.boot.usbcontroller}/device/../mode peripheral
 
-# ---------------------------------------------------------------------------
-# Qualcomm secure services and the metadata key directory.
-#
-# /dev/block/bootdevice is the symlink created just above; the by-name links are
-# created by ueventd while it processes the UFS "block" uevents, so 'on fs' (the
-# trigger TWRP's own init.rc fires from late-init, before the recovery service
-# is forked) is early enough for them and still long before TWRP reaches
-# Partition_Post_Processing().
 on fs
     wait /dev/block/platform/soc/${ro.boot.bootdevice}
     symlink /dev/block/platform/soc/${ro.boot.bootdevice} /dev/block/bootdevice
 
-    # Mount /metadata before TWRP decrypts.  The wrapped key lives in
-    # /metadata/vold/metadata_encryption and Decrypt_Data() (partitionmanager.cpp
-    # :604-607) only tries Mount_By_Path(data->Key_Directory) - a lookup that runs
-    # through Find_Partition_By_Path(), which truncates "/metadata/vold/..." to
-    # "/metadata".  Having it mounted up front removes that ordering dependency.
-    # UnMount_Main_Partitions() (partitionmanager.cpp:2305-2323) only touches
-    # /vendor, the Android root, /product, /boot and /data, so this mount
-    # survives until the keys are unwrapped.
+    # 提前挂 /metadata：包装密钥在里面，且 Key_Directory 查找会被截断成 /metadata
     wait /dev/block/bootdevice/by-name/metadata 10
     mkdir /metadata 0755 root root
     mount ext4 /dev/block/bootdevice/by-name/metadata /metadata noatime,nosuid,nodev,discard
 
-    # qseecomd registers the QSEE listeners and then publishes
-    # vendor.sys.listeners.registered - that is the only vendor.sys.* property
-    # the stock binary sets (strings -a stock/vendor/bin/qseecomd).  Its RPMB/SSD
-    # listeners need /dev/qseecom and the ssd by-name link, otherwise it logs
-    # "ERROR: RPMB_INIT failed, shall not start listener services" and never
-    # registers anything.  Both nodes are labelled by the ramdisk's ueventd.rc
-    # (/dev/qseecom 0660 system drmrpc, /dev/ion 0664 system system - ION is
-    # required because QSEECom allocates its shared buffers through it).
+    # qseecomd 的 RPMB/SSD 监听器需要 /dev/qseecom 与 ssd 链接，否则不注册任何东西
     wait /dev/qseecom 10
     wait /dev/block/bootdevice/by-name/ssd 10
     start vendor.qseecomd
 
-# The HALs must wait for the QSEE daemon to be *running* and for its listeners to
-# be registered, plus hwservicemanager.  Without that gate they call
-# QSEECom_start_app before QSEE is ready and crash-loop.
-#
-# Why both conditions, and why the process state matters:
-#   * vendor.sys.listeners.registered is published by qseecomd itself and is the
-#     only vendor.sys.* property the stock binary sets; it is the semantic
-#     "QSEE listeners are up" signal.
-#   * init.svc.vendor.qseecomd = running is set by init the moment the service is
-#     actually forked (system/core/init/service.cpp:173-192 NotifyStateChange,
-#     called from the process-start path at :783/:884 / :409).  A property set by
-#     a process that failed to start can therefore never satisfy this action, so
-#     the HAL bring-up cannot be triggered by a stale property alone.
+# HAL 闸门：qseecomd 真正 running + 监听器已注册 + hwservicemanager 就绪
 on property:init.svc.vendor.qseecomd=running && property:vendor.sys.listeners.registered=true && property:hwservicemanager.ready=true
     start keymaster-4-0
     start gatekeeper-1-0
@@ -208,9 +84,7 @@ service vendor.qseecomd /vendor_ramdisk/bin/qseecomd
     disabled
     seclabel u:r:recovery:s0
 
-# The keymaster 4.0 HAL is what keystore2 talks to for the TRUSTED_ENVIRONMENT
-# security level, i.e. the only component that can export the wrapped storage
-# key during metadata decryption.
+# keystore2 靠它取 TRUSTED_ENVIRONMENT，是唯一能导出包装存储密钥的组件
 service keymaster-4-0 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
     class early_hal
     user system
@@ -220,10 +94,7 @@ service keymaster-4-0 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-serv
     disabled
     seclabel u:r:recovery:s0
 
-# Gatekeeper 1.0 is declared by the stock vendor vintf manifest; TWRP's
-# Decrypt_Device() ("decrypt with default password" path) and the credential
-# checks go through it.  It is bound to the same QSEECom daemon, so it is gated
-# exactly like keymaster.
+# 原厂 vendor vintf manifest 声明了它；与 keymaster 共用 QSEECom，闸门相同
 service gatekeeper-1-0 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
     class early_hal
     user system
@@ -232,50 +103,6 @@ service gatekeeper-1-0 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-se
     setenv LD_LIBRARY_PATH /vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64
     disabled
     seclabel u:r:recovery:s0
-# ---------------------------------------------------------------------------
-# keystore2 is NOT started from here.
-#
-# The only ordering that decides whether metadata decryption can succeed on its
-# single attempt is "keymaster HAL registered -> keystore2 serves
-# getSecurityLevel(TRUSTED_ENVIRONMENT) -> vold can export the wrapped storage
-# key".  Starting keystore2 from `on late-init` (the stock trigger in
-# bootable/recovery/etc/init/keystore2.rc) leaves that ordering to a race:
-#
-#   TWPartitionManager::Decrypt_Data()             partitionmanager.cpp:599-651
-#     -> android::vold::fscrypt_mount_metadata_encrypted()
-#        -> KeyStorage::exportWrappedStorageKey()   system/vold/KeyStorage.cpp:156
-#           -> Keystore::Keystore()                 system/vold/Keystore.cpp:112-143
-#              AServiceManager_checkService("android.system.keystore2.IKeystoreService/default")
-#              polled 300 x 100 ms  =  a real 30 s blocking barrier, but only for
-#              keystore2 - never for the keymaster HAL
-#              -> getSecurityLevel(TRUSTED_ENVIRONMENT)
-#                 resolved from keystore2's cache, filled eagerly at its startup:
-#                   service.rs:65-79        constructs SecurityLevel::TRUSTED_ENVIRONMENT
-#                                           and treats failure as fatal
-#                   security_level.rs:92-97 -> globals.rs:344 get_keymint_device()
-#                   globals.rs:230-246      -> retry_get_interface()
-#                   utils.rs:665-684        retry_count = 1 unless cfg!(early_vm), so
-#                                           binder::get_interface() is a ONE-SHOT
-#                                           lookup that fails at once (NAME_NOT_FOUND)
-#
-# A keystore2 that starts before the HAL registers therefore exits during startup
-# and is restarted every 5 s (system/core/init/service.h:236) while the HAL is
-# still coming up; nothing retries the failed lookup, and after the fourth exit
-# the `critical` flag makes init reboot to the fatal target
-# (system/core/init/service.cpp:383-384).  The observable failure is not a crash
-# dialog but "I:Unable to decrypt metadata encryption" on a device that has no
-# passphrase at all.
-#
-# The start therefore lives in recovery/root/system/etc/init/keystore2.rc, which
-# overrides the platform file of the same name in the recovery ramdisk and starts
-# keystore2 on property:init.svc.keymaster-4-0=running.  Keep the two files in
-# sync: this file must never start keystore2 again.
-#
-# Residual gap (stated here so it is not mistaken for solved): init.svc.<name>
-# reports process state, not hwbinder registration, and init has no primitive
-# that blocks another process on a service registration.  TWRP's decrypt path
-# reads no readiness property either, so a formally guaranteed happens-before
-# between "keymaster registered" and "Decrypt_Data() called" cannot be
-# expressed in a device-tree rc file.  What the device tree makes deterministic
-# is the ordering keystore2 observes; the platform-side wait that would close
-# the remaining window is recorded in README (search "keystore2 启动顺序").
+
+# keystore2 刻意不在这里启动：见 recovery/root/system/etc/init/keystore2.rc
+# 本文件绝不能再 start keystore2。

@@ -1118,3 +1118,740 @@ fastboot flash recovery_a out/target/product/P725A02/recovery.img   # 与当前�
 
 需要说明的是：TWRP 16 只会在 recovery-as-boot 形态的镜像上向内核命令行追加
 `twrpfastboot=1`；本设备是独立 recovery 分区，直接引导该镜像仍是最安全的首个验证步骤。
+
+---
+
+## 设备树逐文件说明
+
+设备树里的文件只保留单行注释，所有依据、出处、实测证据与回归检查都集中在这里。
+本节按文件组织；行为层面的推导与真机复验记录见上文各章节（t1..t9）。
+
+### BoardConfig.mk
+
+#### A/B
+
+是**普通 A/B**，不是 virtual A/B。依据：`stock/config/config.json` 的 `{"pd_vab":"ab"}`；原厂 boot ramdisk 的 `/fstab.qcom` 在 system/product/vendor 上带 `slotselect`；9008 救砖包（`stock/rawprogram4.xml`）里 boot、recovery、dtbo、modem、dsp、bluetooth、vbmeta 都有 `_a`/`_b` 两份。整包**找不到** snapshot / COW / super_empty 分区，所以 `ENABLE_VIRTUAL_AB` 必须保持关闭。
+
+#### recovery 是独立分区
+
+本机有**专用 recovery 分区**，所以 recovery 不能被折进 boot.img。依据三条：
+
+1. 设备事实（用户确认）。
+2. `stock/rawprogram4.xml:16` 的 `recovery_a` 与 `:39` 的 `recovery_b` 都是 24576 × 4096 = 100663296 字节。
+3. `~/workdir/twrpgen/recovery.img` 正是该分区 100663296 字节的完整 dump，且是一张真正的 AVB 签名镜像（文件尾有 AVBf footer，`original_image_size` 为 0x03A87000），其内核与原厂 `boot.img-kernel` 逐字节相同（sha256 `697dd05f...aca3cb`）。
+
+`BOARD_MOVE_RECOVERY_RESOURCES_TO_VENDOR_BOOT` 留空：原厂分区表里**没有 vendor_boot 分区**，recovery 资源属于 recovery ramdisk。
+
+#### 架构
+
+`arm64` + `armv8-a`，主 ABI `arm64-v8a`，运行时 `cortex-a76`；32 位副架构 `arm` + `armv7-a-neon`，运行时 `cortex-a55`，`TARGET_SUPPORTS_64_BIT_APPS := true`。
+
+#### APEX
+
+原厂 vendor 分区是 Android 11（SDK 30，见 `stock/vendor/build.prop` 的 `ro.vendor.build.version.sdk=30`），因此打开 `OVERRIDE_TARGET_FLATTEN_APEX`。
+
+#### Bootloader
+
+`TARGET_BOOTLOADER_BOARD_NAME := lito`，`TARGET_NO_BOOTLOADER := true`。
+
+#### 显示
+
+面板 1080x2460 @ 6.9 英寸，VISIONOX RM692C9（10-bit、DSC、command mode），物理约 400 PPI。但原厂 ROM 用的是 `ro.sf.lcd_density=480`，而这个值正是 `TARGET_SCREEN_DENSITY` 产生的（`build/make/core/system/sysprop_config.mk:127-129` → `ro.sf.lcd_density`）。所以 480 才是这台机器自己的密度，**不要**按物理 PPI 去「纠正」它。
+
+**这里刻意没有「默认刷新率」这个开关。** 生成器模板曾带 `TARGET_RECOVERY_DEFAULT_REFRESH_RATE := 90`，那是个**死变量**：在整个 TWRP 16 检出（bootable/、vendor/、build/make/、system/core/、hardware/qcom-caf/、device/）里全局搜索，它只出现在本设备树，任何 makefile 或源码都不读它，所以它从来不可能影响构建。DRM 后端的模式选择完全由内核数据驱动：
+
+* `twrpminui/graphics_drm.cpp:1023-1044` —— `find_main_monitor()` 选 `/proc/cmdline` 上 `video=Virtual-1:` 指定的模式，否则选第一个带 `DRM_MODE_TYPE_PREFERRED` 的模式，**从不看刷新率**；
+* `twrpminui/graphics_drm.cpp:1291-1294` —— 所选模式的 hdisplay/vdisplay 成为 framebuffer 尺寸；
+* `twrpminui/graphics_drm.cpp:1470` —— 该模式通过 DRM property blob 应用。
+
+面板实际跑 90 Hz 是**引导器**选了 90 Hz 那个面板变体，与本设备树无关：`/proc/cmdline` 里是 `msm_drm.dsi_display0=qcom,dsi_visionox_rm692c9_10bit_dsc_90hz_cmd_display:`，dmesg 打印 `Successfully bind display panel 'qcom,dsi_visionox_rm692c9_10bit_dsc_90hz_cmd_display'`，`/sys/class/drm/.../modes` 里同时有 `1080x2460x60x63334cmd` 与 `1080x2460x90x88154cmd`。**不要重新加回刷新率设置**，没有消费者。
+
+#### 内核镜像头
+
+下面每个值都抄自**原厂镜像**，不是猜的：
+
+* `stock/boot/split_img/boot.img-*`（header_version、base、pagesize、kernel_offset、ramdisk_offset、second_offset、tags_offset、dtb_offset、cmdline、imgtype、ramdiskcomp、hashtype、origsize）；
+* `~/workdir/twrpgen/recovery.img` 的 raw v2 头。
+
+原厂 boot.img：header v2、base 0x00000000、pagesize 4096、kernel_offset 0x00008000、ramdisk_offset 0x01000000、second_offset 0x00000000、tags_offset 0x00000100、dtb_offset 0x01f00000，AOSP、sha1、gzip、origsize 100663296。原厂 recovery.img 布局相同，只是头部 dtb_size 字段里多一块 12733035 字节的 dtb，内容与 `prebuilt/dtbo.img` 相同。
+
+`BOARD_DTB_OFFSET := 0x01f00000` 必须显式给出：生成器模板从不传它，会静默地以 dtb_offset 0 重打包每一张镜像。
+
+`BOARD_INCLUDE_DTB_IN_BOOTIMG := true`：原厂 boot/recovery 都把设备 DTB 放在镜像里，所以要保持开启；用 prebuilt dtb 时文件名还必须是 `*.dtb`，因为 `INSTALLED_DTBIMAGE_TARGET` 是 cat `BOARD_PREBUILT_DTBIMAGE_DIR/*.dtb`。
+
+`BOARD_INCLUDE_RECOVERY_DTBO := false`：原厂 recovery 头里确实带 dtb，但 TWRP 的 recovery ramdisk 比原厂那 32 KiB 大得多，内核 42 MiB + ramdisk + dtbo 24 MiB 塞不进 96 MiB 分区；引导器本来就从 dtbo 分区加载，所以保持关闭，只有真机证明需要时才打开。
+
+#### 预编译内核
+
+没有 in-tree 内核源码，prebuilt 是唯一可行路径。三个 prebuilt 与原厂产物逐字节相同：`prebuilt/kernel`（sha256 `697dd05f...aca3cb` ＝ 原厂 `boot.img-kernel`，42035216 字节）、`prebuilt/dtb.dtb`（sha256 `df33dddc...0f1e34` ＝ 原厂 `boot.img-dtb`，2027715 字节）、`prebuilt/dtbo.img`（DTBO 表 magic 0xd7b7ab1e，21 个 overlay，＝ 设备 dtbo）。
+
+#### 分区尺寸
+
+尺寸来自原厂 9008 包的 GPT（`stock/rawprogram4.xml`），描述的是**出厂布局**；改过机的设备可能不同，刷任何东西之前先用 `fastboot getvar partition-size:<name>` 复核。
+
+| 分区 | rawprogram4.xml | 计算 |
+|---|---|---|
+| boot_a / boot_b | `:13` / `:36` | 24576 × 4096 = 100663296 |
+| recovery_a / recovery_b | `:16` / `:39` | 24576 × 4096 = 100663296 |
+| dtbo_a / dtbo_b | `:19` / `:42` | 6144 × 4096 = 25165824 |
+
+#### 输出目录：为什么 product / odm 没有单独设置
+
+`TARGET_COPY_OUT_PRODUCT` / `TARGET_COPY_OUT_ODM` **刻意不设**。AOSP 默认是 `system/product` 与 `vendor/odm`。若把它们改成独立的 `product`／`odm`，会触发 `build/make/core/board_config.mk:404-414` 的 `check_image_config` 守卫，于是必须同时提供 `BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE` / `BOARD_ODMIMAGE_FILE_SYSTEM_TYPE`（或 prebuilt 镜像），`lunch` 会直接失败：
+
+```
+If TARGET_COPY_OUT_PRODUCT is 'product', either BOARD_PREBUILT_PRODUCTIMAGE
+or BOARD_PRODUCTIMAGE_FILE_SYSTEM_TYPE must be set.
+```
+
+本机不构建 product.img / odm.img，所以不需要那两个独立目录。`BoardConfig.mk:713-716/822-826` 确认了默认值。
+
+`BOARD_USES_METADATA_PARTITION := true`：原厂 boot ramdisk 的 `fstab.qcom` 挂载 `/metadata`，且 userdata 是 FBE/ICE（`fileencryption=ice,wrappedkey,keydirectory=/metadata/vold/metadata_encryption`）。
+
+#### super 分区尺寸（已经定案）
+
+`stock/rawprogram0.xml:10`：`label="super" num_partition_sectors="3145728" SECTOR_SIZE_IN_BYTES="4096"`，即 3145728 × 4096 = 12884901888 字节 = 12 GiB。这与 `stock/config/config.json` 的 `{"supersize":"12884901888"}` 以及 `{"repack_fz":"qti_dynamic_partitions"}` 一致。生成器给的 9126805504（8.5 GiB）是错的，这里已纠正。
+
+`BOARD_ZTE_DYNAMIC_PARTITIONS_SIZE := 12883853312` 按 AOSP 规则 = SUPER_PARTITION_SIZE − 1 MiB（元数据槽）。
+
+`system_ext` 与 `odm` 虽然列在分区清单里，但本仓库没有对应镜像、原厂 boot fstab 里也没有 `/system_ext` 条目。在 AOSP/TWRP 构建里它们无害（分区根本不会生成），若真实 super 元数据里的组包含它们则是必需的——用设备上的 `lpdump` 确认。
+
+#### Recovery 与 fstab 位置
+
+TWRP 先找 `/etc/twrp.fstab`、再找 `/etc/recovery.fstab`（`bootable/recovery/twrp.cpp:441-446`），也就是 recovery ramdisk 里的 `/system/etc/...`，由 `build/make/core/Makefile:2821` 复制过去。这里指向参考树（如 `device/xiaomi/munch`）通用的设备树路径，语义最明确；**刻意不用** `Makefile:2645` 的兜底路径（`$(TARGET_DEVICE_DIR)/recovery.fstab`）——生成器模板把 fstab 放错了地方，已经移到这里。
+
+#### Recovery ramdisk 的可执行位（构建期修不了）
+
+`recovery/root/vendor_ramdisk/bin/` 下那三个可执行文件，**构建期没有任何办法让它们带上可执行位**，所以这个文件不要去尝试。
+
+看起来最对路的做法——在 `BOARD_RECOVERY_IMAGE_PREPARE` 里对 `$(TARGET_RECOVERY_ROOT_OUT)` 做 chmod——**是无效的，而且已被实测证伪**：加上之后暂存目录确实是 0755，打出来的镜像仍是 0644。因为 mkbootfs 会重写每个归档条目的权限（`system/core/mkbootfs/mkbootfs.cpp` 的 `fix_stat()`），来源是 `fs_config()`；而不在任何 fs_config 表里的普通文件，`fs_config()` 直接返回硬编码默认值（`system/core/libcutils/fs_config.cpp:391-395`）：
+
+```c
+*mode = (*mode & S_IFMT) | (dir ? 0755 : 0644);
+```
+
+`vendor_ramdisk/**` 匹配不到任何表项（表里覆盖的是 `system/bin/*`、`vendor/bin/*`、`first_stage_ramdisk/system/bin/*` 之类），所以这三个文件在镜像里**永远是 0644**，与磁盘上的权限无关。在 git 里标成 100755 也没用——打包器不看它，而且本检出在 Windows 文件系统上本来就表示不了这个位。
+
+因此可执行位由 init 在启动时补上，那是唯一还能改它的层（`recovery/root/init.recovery.qcom.rc` 的 `on early-init`）：
+
+```
+chmod 0755 /vendor_ramdisk/bin/qseecomd
+chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti
+chmod 0755 /vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti
+```
+
+`chmod` 是 init 现役 builtin（`system/core/init/builtins.cpp:1017`／注册在 `:1288`），参数顺序是 `chmod <八进制模式> <路径>`（`system/core/init/README.md:556`）——**模式在前**。回归检查：`tools/verify_decrypt_prereqs.mjs` 的 `rc/exec-bits`。
+
+#### 安全补丁级别
+
+原厂 `stock/vendor/build.prop` 的 `ro.vendor.build.security_patch=2022-01-01` 与 `stock boot.img-os_patch_level=2022-01` 都是 2022-01-01；生成器模板给的 2021-08-01 是错的。
+
+#### 验证启动（AVB）
+
+原厂 recovery 是 AVB 签名的，所以 recovery.img 保留 AVB。`--flags 3` = vbmeta 里 HASHTREE_DISABLED | VERIFICATION_DISABLED。签名用的是 AOSP **公开测试密钥**——它不具备任何可信度，锁定设备上无法通过厂商校验。
+
+#### Platform 版本变量
+
+`PLATFORM_SECURITY_PATCH` / `PLATFORM_VERSION` 在 Android 16 里是只读发布标志（`.KATI_READONLY`），从设备树设置会触发 `build/make/core/version_util.mk` 里的 `$(error)` 守卫。只有 `PLATFORM_VERSION` 还可以覆盖。留档的原厂值：`PLATFORM_VERSION=11`，patch 2022-01-01。
+
+#### TWRP 配置：触屏、背光、振动
+
+`TW_INPUT_BLACKLIST` 保持不设，而且这**已在真机确认**（不只是「未证明」）：生成器模板拉黑了 `hbtp_vm`，本机没有这个设备；五个已注册输入设备里恰好只有一个属于 touchscreen 类，没有任何东西需要过滤。
+
+真机实测（只读 adb，原始 dump 在 `log/session-20261005-2150/`，来源 `/proc/bus/input/devices`）：
+
+| 设备 | event | 事实 |
+|---|---|---|
+| `goodix_ts` | event4 | **就是触屏**。`ABS=0x0261800000000003` + `BTN_TOUCH` + `BTN_TOOL_FINGER`，即 protocol-B 多点触控，TWRP 的 `events.cpp:434-437` `has_touch_protocol` 判定通过（`BTN_TOUCH` 与 `ABS_MT_POSITION_X/Y` 都置位）。驱动 probe 干净：`goodix_ts_probe OUT r:0`、`input: goodix_ts as .../input4`、IRQ 372 |
+| `gpio-keys` | event3 | `KEY=0xc000000000000`，即 bit 114/115 = `KEY_VOLUMEUP`/`KEY_VOLUMEDOWN` |
+| `qpnp_pon` | event0 | `KEY=0x14000000000000`，即 bit 116/118 = `KEY_POWER`/`KEY_POWER2`（pm8150 pwrkey+resin） |
+| `ah1898` | event1 | `EV=3`、KEY 位图空 → 霍尔传感器，只发 `EV_KEY` 0/1，无法注入按键或触摸 |
+| `goodix_fp` | event2 | 指纹，非 touchscreen 类 |
+
+TWRP 在 `ev_init()` 扫描 `/dev/input`（`events.cpp:462-470`）之后用 `ev_get()`（`events.cpp:1345`）读取它们，设备节点存在且属主符合预期：`/dev/input/event*` 是 `crw-rw---- root input`；`/sys/class/leds/vibrator/{duration,activate}` 是 `-rw-rw-r-- root root`。
+
+背光路径是**自动发现**的——`recovery.log` 打印 `Found brightness file at '/sys/class/backlight/panel0-backlight/brightness'`，即 `data.cpp:795` 的 `find_first_named_file("brightness", "/sys/class/backlight")`——所以 `TW_BRIGHTNESS_PATH` 是多余的，刻意不设。TWRP 自己的初始默认值是 `tw_brightness = 255/5 = 51`（`data.cpp:828`），而且只是默认值：实际取值来自持久化的 twrp 设置文件，这也是为什么本机 `recovery.log` 里显示 100（属于设备侧状态，不是本设备树的事）。`max_brightness=255` 让任何 0..255 的 TWRP 取值都合法，`TW_SCREEN_BLANK_ON_BOOT`（`gui.cpp:940`）在启动时写 0——`recovery.log` 里正是那条 100 → 0 的序列。
+
+**振动也刻意没有开关**：本机振动马达**可以**通过 TWRP 写的那套接口驱动（`events.cpp:65-68`、`352-358`、`380`）——PMIC 驱动把它注册成 LED class 设备 `/sys/class/leds/vibrator/{duration,activate}`（device → `qcom,vibrator@5300`），所以不需要 `vibrate_with_ff()` 那条路，`TW_NO_HAPTICS := true` 在事实层面是错的。不用 TWRP 也能复现振动：
+
+```
+echo 200 > /sys/class/leds/vibrator/duration
+echo 1   > /sys/class/leds/vibrator/activate
+```
+
+（写下去手机会震；本设备树从不自动这么做。）
+
+#### Crypto（FBE）
+
+`/data` 是 metadata 加密的：裸的 userdata 块设备**故意**没有明文 F2FS superblock。TWRP 必须先解开 `/metadata/vold/metadata_encryption` 下的 metadata 密钥、建立 dm-default-key 映射；直接挂 `/dev/block/sda9` 一定报 magic mismatch。保留厂商 additional.fstab 那条路径，因为它提供原厂的 `inlinecrypt` 选项。Qualcomm FBE 支持与 metadata 解密都必须编译进来。
+
+`TW_INCLUDE_CRYPTO_FBE := true` 的传递链：`vendor/twrp/config/BoardConfigSoong.mk:271-272` 在 `TW_INCLUDE_CRYPTO` 为真时设置它，进而喂给 soong 变量 `include_crypto_fbe`（`BoardConfigSoong.mk:286`）→ `-DTW_INCLUDE_FBE`（`vendor/twrp/build/soong/Android.bp:295-297`）。已在构建产物里验证：`strings .../recovery | grep -c "misc/vold/user_keys"` → 1（该字符串只在 `#ifdef TW_INCLUDE_FBE` 下编译），而 `#else` 分支里的 `"FBE found but FBE support not present in TWRP"` 为 0。回归检查：`tools/verify_decrypt_prereqs.mjs` 的 `fbe-macro`。
+
+`TW_FORCE_KEYMASTER_VER := true` 把 keymaster HAL 代次钉死，而不是从 `/vendor` 推导：`Process_Keymaster_Version()`（`partitionmanager.cpp:265-302`）否则会去读 `<partition>/etc/vintf/manifest.xml`，而 TWRP 在调用 `Decrypt_Data()` 之前已经把 `/vendor` 卸掉了（`partitionmanager.cpp:453-456` / `561`）。原厂 vendor manifest 声明的是 keymaster 4.0 与 4.1（`stock/vendor/etc/vintf/manifest.xml:87-90`），本设备树提供的正是 4.0 HAL，所以 4.x 是这里的正确值。宏和属性都需要：`TW_FORCE_KEYMASTER_VER` 短路 manifest 探测（`vendor/twrp/build/soong/Android.bp:403-406`），`keymaster_ver` 提供取值（`variables.h:161` 的 `TW_KEYMASTER_VERSION_PROP`）。
+
+#### 加密相关的平台版本改写
+
+`PLATFORM_SECURITY_PATCH := 2099-12-31` 与 `PLATFORM_VERSION := 99.87.36` 是**构建期属性**，用来满足 FBE metadata 解密过程中的 keymaster patch-level 比较；它们**不是**设备真实的补丁级别。已观察到在本树的 TWRP 16 构建里生效（`log/recovery.log` 显示 `ro.build.version.security_patch = 2099-12-31`、`ro.build.version.release = 99.87.36`）。`VENDOR_SECURITY_PATCH` 经 `build/make/core/sysprop_config.mk` 变成 `ro.vendor.build.security_patch`。若上游 manifest／分支变化，要重新确认这些赋值仍然生效（上游 AOSP 在 `version_util.mk` 里用 ifdef + `$(error)` 守着 `PLATFORM_SECURITY_PATCH`）。
+
+### device.mk / twrp_P725A02.mk / AndroidProducts.mk / Android.mk / Android.bp
+
+#### device.mk
+
+| 变量 | 取值与理由 |
+|---|---|
+| `PRODUCT_SHIPPING_API_LEVEL` | `30`。原厂 `stock/system/build.prop` 的 `ro.build.version.sdk=30`、`ro.board.api_level=30`，即这台的 vendor 侧是 Android 11。 |
+| `PRODUCT_USE_DYNAMIC_PARTITIONS` | `true`。原厂 `prop.default` 带 `ro.boot.dynamic_partitions=true`，原厂 fstab 把 system/product/vendor 标为 logical，super 本身是 3145728 × 4096 = 12 GiB（`stock/rawprogram0.xml:10`）。 |
+| `AB_OTA_UPDATER` | `true`。普通（非 virtual）A/B：`stock/config/config.json` 的 `{"pd_vab":"ab"}`，9008 包里有 `_a`/`_b` 两份与一张非 sparse 的 `super.img`，但**没有** snapshot / COW / super_empty 分区，所以 `ENABLE_VIRTUAL_AB` 必须保持关闭。 |
+| `PRODUCT_PACKAGES`（boot control） | `android.hardware.boot@1.1-impl` + `android.hardware.boot@1.1-service`。原厂 vendor 实现的是 **boot@1.1 而不是 1.0**（`stock/vendor/etc/init/android.hardware.boot@1.1-service.rc`，`stock/vendor/etc/vintf` 指向 `android.hardware.boot@1.1`），生成器给的 boot@1.0 那对是错的。 |
+| A/B postinstall | `otapreopt_script`、`cppreopts.sh`、`update_engine`、`update_verifier`、`update_engine_sideload`，以及 `AB_OTA_POSTINSTALL_CONFIG` 的 `RUN_POSTINSTALL_system` / `POSTINSTALL_PATH_system` / `FILESYSTEM_TYPE_system=ext4` / `POSTINSTALL_OPTIONAL_system`。 |
+| fastbootd | `fastbootd` + `android.hardware.fastboot@1.0-impl-mock`。 |
+| `TARGET_RECOVERY_DEVICE_MODULES` / `RECOVERY_LIBRARY_SOURCE_FILES` | `libion` 及其 `.so`：msm-4.19/lito 上 recovery 显示路径要用它。 |
+| `PRODUCT_PROPERTY_OVERRIDES` | `ro.adb.secure=0`、`keymaster_ver=4.x`。`ro.boot.dynamic_partitions` 由引导器设置，无需覆盖。 |
+| Crypto 开关 | `TW_INCLUDE_CRYPTO` / `TW_INCLUDE_CRYPTO_FBE` / `TW_INCLUDE_FBE_METADATA_DECRYPT` 均为 `true`。裸 userdata 是 metadata 加密的，只有 `/metadata/vold/metadata_encryption` 里的密钥被解开、dm-default-key 设备建立之后，明文 F2FS superblock 才会出现。 |
+
+**关于 `bootctrl.lito`（刻意不加）**：QTI/CAF 的 boot control 实现**不在本 manifest 里**——检出中既没有 `hardware/qcom-caf/bootctrl`，也没有任何 in-tree 模块提供它，所以请求它只会让构建失败。TWRP 本身不需要 boot control HAL：它从 `ro.boot.slot_suffix` 读槽位、直接操作 misc 分区。因此 `PRODUCT_PACKAGES += bootctrl.lito` 与 `PRODUCT_STATIC_BOOT_CONTROL_HAL` 都已从生成器模板里删掉。只有 manifest 里出现可用的 bootctrl 实现之后才考虑加回。
+
+#### twrp_P725A02.mk
+
+继承顺序（`PRODUCT_*` 标识必须放在所有 inherit 之后）：
+
+1. `$(SRC_TARGET_DIR)/product/base.mk`；
+2. `$(SRC_TARGET_DIR)/product/core_64_bit_only.mk` —— 本机是 **64 位-only ABI 列表**（原厂 `prop.default` 的 `ro.product.cpu.abilist=arm64-v8a,armeabi-v7a,armeabi` 与 `ro.product.first_api_level=29`），所以用 64 位产品模板；
+3. `device/zte/P725A02/device.mk`；
+4. `vendor/twrp/config/common.mk` —— **`vendor/twrp` 是本 manifest 里唯一的 vendor 树，`vendor/omni` 不存在**，所以生成器模板里的 `vendor/omni/config/common.mk` 引用从来不可能工作。
+
+设备标识：`PRODUCT_DEVICE := P725A02`、`PRODUCT_NAME := twrp_P725A02`、`PRODUCT_BRAND := ZTE`、`PRODUCT_MODEL := ZTE A2121`、`PRODUCT_MANUFACTURER := ZTE`。
+
+`PRIVATE_BUILD_DESC` 与 `BUILD_FINGERPRINT` 都取自原厂 `stock/vendor/build.prop` 的 `ro.vendor.build.fingerprint`：`ZTE/CN_P725A02/P725A02:11/RKQ1.220125.001/20221021.173842:user/release-keys`。
+
+#### AndroidProducts.mk
+
+`PRODUCT_MAKEFILES := $(LOCAL_DIR)/twrp_P725A02.mk`；`COMMON_LUNCH_CHOICES := twrp_P725A02-eng`。
+
+注意 `COMMON_LUNCH_CHOICES` 里的虚线写法**只用于 Tab 补全与 `list_products` 元数据**，它并不能让 `lunch twrp_P725A02-eng` 变得可用——构建必须用三参数形式 `lunch twrp_P725A02 bp2a eng`，理由见本文档「构建步骤」。
+
+#### Android.mk / Android.bp
+
+`Android.mk` 只在 `TARGET_DEVICE` 是 P725A02 时 include 子目录 makefile；`Android.bp` 只声明 `soong_namespace {}`。两者都没有逻辑，只有版权头。
+
+### recovery/root/init.recovery.qcom.rc
+
+#### 这个文件的来历
+
+它是从生成器模板里**唯一保留下来**的一块：内容与原厂 recovery ramdisk 自带的 `init.recovery.qcom.rc` 逐字节相同（同样的背光写入、同样的 USB controller 属性、同样的 bootdevice 符号链接）。`recovery/root` 里其余部分都被改造成 TWRP 16 真正会读的路径：
+
+| 路径 | 用途 |
+|---|---|
+| `system/etc/recovery.fstab` | `TARGET_RECOVERY_FSTAB`，由 `core/Makefile` 复制 |
+| `system/etc/twrp.flags` | 被当作 `/etc/twrp.flags` 读取 |
+| `system/etc/ueventd.rc` | recovery 模式下 ueventd 解析的第一个路径 |
+| `init.recovery.usb.rc` | USB gadget + ADB/MTP 触发；覆盖同名上游文件 |
+
+#### 路径前提
+
+TWRP 自己的 `bootable/recovery/etc/init.rc` 已经做了这些事，所以这里不重复：
+
+* `import /init.recovery.${ro.hardware}.rc` —— 也就是本文件（`ro.hardware=qcom`）；
+* `symlink /system/etc /etc` —— 因此 `/etc/twrp.fstab`、`/etc/recovery.fstab`、`/etc/twrp.flags` 都能解析；
+* `import /init.recovery.usb.rc` —— USB gadget 初始化。
+
+本设备树**确实覆盖了最后一个文件**：`recovery/root/init.recovery.usb.rc` 落到 ramdisk 根目录，替换上游 `bootable/recovery/etc/init.recovery.usb.rc`（真机验证：`/init.recovery.usb.rc` 的 md5 `8bf681c1486ed9c88efd772b66879a14` 与仓库文件一致）。上游 init.rc 没有提供的 configfs `mtp,adb` 分支就在那个文件里。只有 `/system/etc -> /etc` 这个符号链接没有在这里重复。
+
+#### on early-init：为什么加密服务必须跑在 ramdisk 里
+
+TWRP 挂载 `/vendor` 只是为了读 keymaster manifest 和 vendor build.prop，然后在解密之前又把它卸掉：
+
+* `partitionmanager.cpp:426`（`Process_Fstab` 第一遍）挂载 `/vendor`；
+* `partitionmanager.cpp:453-456` / `487-515`（`Setup_Fstab_Partitions`）把它卸掉；
+* `partitionmanager.cpp:560-561` 随后置 `TW_IS_ENCRYPTED=1` 并调用 `Decrypt_Data()`。
+
+而 init 启动服务是异步的、主循环每轮只执行一条动作命令（`system/core/init/init.cpp`、`builtins.cpp` 的 `do_start`），所以从「由 `/vendor` 触发的动作」里排队一条 `start <vendor hal>` 会和那次卸载赛跑，而且通常输：init fork HAL 的时候 `/vendor/bin` 已经没了。没有 keymaster，`Decrypt_Data()` 就解不开硬件包装的 metadata 密钥，dm-default-key 建不起来，`/data` 永远挂不上，`TW_IS_ENCRYPTED` 停在 1，于是 `gui_loadResources()`（`gui/gui.cpp:990-999`）无限加载解密页——而这台设备**根本没有密码**。
+
+这些二进制本体放在 `recovery/root/vendor_ramdisk/`（qseecomd、keymaster 4.0 HAL、gatekeeper 1.0 HAL 及其共享库闭包）。这里不依赖 `/vendor`、不依赖 vendor mapper 节点、也不依赖任何 `twrp.super.*` 属性。
+
+#### on early-init：可执行位
+
+三个加密二进制**构建期拿不到可执行位**。原因与实测证据见本文档「BoardConfig.mk / Recovery ramdisk 的可执行位」，此处不重复。结论：由 init 在 early-init 里补 `chmod 0755`。
+
+early-init 的余量很大：这些服务要么由 `on fs` 启动、要么由更晚的属性触发器启动，而 init 按队列顺序执行动作；recovery 的 ramdisk 是可写 rootfs，所以 `do_chmod` 里的 `fchmodat()` 会成功。没有这一步，每次 fork 都会失败：`init: cannot execv('/vendor_ramdisk/bin/qseecomd') ... Permission denied`，服务永远停在 `restarting`。
+
+#### on early-init：trustlet 目录
+
+`libkeymasterdeviceutils.so` 用**硬编码**路径 `/vendor/firmware_mnt/image` 打开 keymaster TA（那串字面量就在原厂库里），所以这个路径必须在 keymaster-4-0 运行之前存在，而且**不能被任何挂载遮蔽**。
+
+#### on early-init：为什么是 bind mount 而不是拷贝
+
+`/vendor/bin` 与 `/vendor/lib64` 是 bind mount：链接器会沿服务导出的 `LD_LIBRARY_PATH` 去解析 HAL 的 `DT_NEEDED`，而将来一旦把真实的 vendor 分区挂到 `/vendor`，拷贝过去的目录树会被遮住——bind mount 不会（因为它本身就是 `/vendor` 当时显示的东西）。
+
+同时把 firmware loader 的路径也指过去：内核 firmware loader 还会走 `recovery/root/system/etc/ueventd.rc` 里的 `firmware_directories` 列表。
+
+#### on init
+
+* 写 `/sys/class/backlight/panel0-backlight/brightness` 为 `200` —— 原厂 recovery ramdisk 就是这么做的。
+* `setprop sys.usb.configfs 1`。
+
+#### on property:ro.boot.usbcontroller=*
+
+把 `ro.boot.usbcontroller` 转成 `sys.usb.controller`。原厂 recovery 里那条 `write /sys/class/udc/.../mode peripheral` 是**注释掉的**，原因：controller 字符串本身就以 `.dwc3` 结尾，而 `sys.usb.controller` 是原样消费的（`ro.boot.usbcontroller=a600000.dwc3`，见原厂 `boot.img-cmdline`），所以 `/sys/class/udc/${ro.boot.usbcontroller}` 不需要额外的 `.dwc3` 后缀就能解析。这里保持禁用。
+
+#### on fs：bootdevice 符号链接与 /metadata 提前挂载
+
+`/dev/block/bootdevice` 是这里创建的符号链接；`by-name` 那些链接由 ueventd 在处理 UFS 的 block uevent 时创建，所以 `on fs`（TWRP 自己的 init.rc 从 late-init 触发的时机，早于 recovery 服务被 fork）对它们来说足够早，也远早于 TWRP 走到 `Partition_Post_Processing()`。
+
+**把 `/metadata` 提前挂上**：包装密钥在 `/metadata/vold/metadata_encryption` 下，而 `Decrypt_Data()`（`partitionmanager.cpp:604-607`）只会尝试 `Mount_By_Path(data->Key_Directory)`——这条查找会过 `Find_Partition_By_Path()`，而它把 `/metadata/vold/...` 截断成 `/metadata`。提前挂好就消除了这个顺序依赖。`UnMount_Main_Partitions()`（`partitionmanager.cpp:2305-2323`）只动 `/vendor`、Android root、`/product`、`/boot` 和 `/data`，所以这个挂载能活到密钥被解开之后。
+
+#### on fs：qseecomd 的启动条件
+
+qseecomd 先注册 QSEE 监听器，然后发布 `vendor.sys.listeners.registered`——那是原厂二进制**唯一**设置的 `vendor.sys.*` 属性（`strings -a stock/vendor/bin/qseecomd` 可验）。它的 RPMB/SSD 监听器需要 `/dev/qseecom` 和 `ssd` 的 by-name 链接，否则会打印 `ERROR: RPMB_INIT failed, shall not start listener services` 并且什么都不注册。两个节点都由 ramdisk 的 `ueventd.rc` 打标签（`/dev/qseecom` 0660 system drmrpc，`/dev/ion` 0664 system system——ION 是必需的，因为 QSEECom 通过它分配共享缓冲）。
+
+#### HAL 的闸门：为什么必须是这两个条件
+
+没有这道闸门，两个 HAL 会在 QSEE 就绪之前调用 `QSEECom_start_app` 并反复崩溃。
+
+* `vendor.sys.listeners.registered` 由 qseecomd 自己发布，是语义上的「QSEE 监听器已就绪」信号；
+* `init.svc.vendor.qseecomd = running` 由 init 在服务**真正被 fork 的那一刻**设置（`system/core/init/service.cpp:173-192` 的 `NotifyStateChange`，从 `:783`/`:884`/`:409` 的进程启动路径调用）。因此「某个进程没起来但属性残留」这种情况**永远无法**满足这个动作，HAL 的拉起不可能被陈旧属性误触发。
+
+再加上 `hwservicemanager.ready=true`（它由 VINTF manifest 决定，见本文档「vintf/manifest.xml」）。
+
+#### 三个 service 定义
+
+| service | 可执行文件 | 关键字段 |
+|---|---|---|
+| `vendor.qseecomd` | `/vendor_ramdisk/bin/qseecomd` | `class core`、`user root`、`group root drmrpc`、`disabled`、`u:r:recovery:s0` |
+| `keymaster-4-0` | `/vendor_ramdisk/bin/hw/android.hardware.keymaster@4.0-service-qti` | `class early_hal`、`user system`、`group system drmrpc`、`interface android.hardware.keymaster@4.0::IKeymasterDevice default`、`disabled` |
+| `gatekeeper-1-0` | `/vendor_ramdisk/bin/hw/android.hardware.gatekeeper@1.0-service-qti` | `class early_hal`、`user system`、`group system drmrpc`、`interface android.hardware.gatekeeper@1.0::IGatekeeper default`、`disabled` |
+
+三者都导出同一串 `LD_LIBRARY_PATH`：`/vendor_ramdisk/lib64:/vendor_ramdisk/lib64/hw:/vendor/lib64:/vendor/lib64/hw:/system/lib64`。三者都是 `disabled`——只由上面的闸门显式 `start`，不随 class 自动拉起。
+
+keymaster 4.0 HAL 是 keystore2 获取 `TRUSTED_ENVIRONMENT` 安全级别时对话的对象，也就是 metadata 解密期间**唯一**能导出包装存储密钥的组件。gatekeeper 1.0 则是原厂 vendor vintf manifest 声明的、TWRP 的 `Decrypt_Device()`（「用默认密码解密」那条路）与凭据检查会走的组件；它绑定同一个 QSEECom 守护进程，所以闸门与 keymaster 完全一致。
+
+#### keystore2 不在这里启动
+
+决定「唯一一次解密能否成功」的顺序只有一个：**keymaster HAL 注册 → keystore2 能回答 `getSecurityLevel(TRUSTED_ENVIRONMENT)` → vold 才能导出包装存储密钥**。从 `on late-init`（`bootable/recovery/etc/init/keystore2.rc` 的原厂触发点）启动 keystore2 会把这个顺序交给竞态：
+
+```
+TWPartitionManager::Decrypt_Data()             partitionmanager.cpp:599-651
+  -> android::vold::fscrypt_mount_metadata_encrypted()
+     -> KeyStorage::exportWrappedStorageKey()   system/vold/KeyStorage.cpp:156
+        -> Keystore::Keystore()                 system/vold/Keystore.cpp:112-143
+           AServiceManager_checkService("android.system.keystore2.IKeystoreService/default")
+           轮询 300 x 100 ms = 真正阻塞 30 秒的屏障，但**只等 keystore2**，从不等 keymaster HAL
+           -> getSecurityLevel(TRUSTED_ENVIRONMENT)
+              取自 keystore2 启动时就填好的缓存：
+                service.rs:65-79        构造 SecurityLevel::TRUSTED_ENVIRONMENT，失败即致命
+                security_level.rs:92-97 -> globals.rs:344 get_keymint_device()
+                globals.rs:230-246      -> retry_get_interface()
+                utils.rs:665-684        retry_count = 1 unless cfg!(early_vm)，
+                                        即 binder::get_interface() 是**一次性**查询，
+                                        未注册立刻 NAME_NOT_FOUND
+```
+
+于是在 HAL 注册之前启动的 keystore2 会在启动阶段退出，并在 HAL 还没起来时每 5 秒被重启一次（`system/core/init/service.h:236`）；失败的查询不会重试，而 `critical` 标志会让 init 在若干次退出后重启到 fatal target。可观察到的现象不是崩溃对话框，而是**一台根本没有密码的设备**上永远显示 `I:Unable to decrypt metadata encryption`。
+
+因此启动点搬到了 `recovery/root/system/etc/init/keystore2.rc`——它覆盖 ramdisk 里的同名平台文件，改为 `on property:init.svc.keymaster-4-0=running` 启动。**两个文件必须保持同步：本文件绝不能再启动 keystore2。**
+
+#### 仍然存在的空档（明说，不当作已解决）
+
+`init.svc.<name>` 反映的是**进程状态**，不等于 hwbinder 注册；init 也没有「阻塞等待另一个进程完成服务注册」的原语。TWRP 的解密路径同样不读任何就绪属性，所以「keymaster 已注册」到「调用 `Decrypt_Data()`」之间的严格 happens-before，在设备树 rc 里表达不出来。设备树能确定的是 keystore2 观察到的顺序；剩下那个窗口需要 platform 侧的等待，记录在本文档「keystore2 启动顺序」一节。
+
+### recovery/root/init.recovery.usb.rc
+
+本文件在 ramdisk 内覆盖 TWRP 上游的 `etc/init.recovery.usb.rc`。
+
+#### 现场问题（t1 只读诊断 D1，见 `log/session-20261005-2150/FINDINGS.md`）
+
+**ADB 正常，MTP 不可用。** 原因链：
+
+1. 本机是 **configfs gadget**：`sys.usb.configfs=1`、UDC=`a600000.dwc3`，内核里没有 legacy 的 `/sys/class/android_usb/android0` 节点（真机 `cat` 该路径 ENOENT）。
+2. TWRP 上游 `bootable/recovery/etc/init.rc` 的 configfs 分支只有 `adb` / `sideload` / `fastboot` / `none`（`:195-253`），**没有 `mtp,adb` 分支**，也不创建 `functions/mtp.gs0`（`:165-178` 只建 `ffs.adb` 与 `ffs.fastboot`）。但 TWRP UI 启动后会自动启用 MTP：`twrp.cpp:373-393`（STARTUP 步骤）→ `partitionmanager.cpp:2689-2695` 的 `Enable_MTP()`（先把 `sys.usb.config` 置 `none`、再置 `mtp,adb`）。没有这个分支，`mtp,adb` 期间 UDC 就不会被重新拉起——「显示修好后 ADB 失效」正是这么来的。
+3. TWRP 的 MTP 后端在两条路径间运行期二选一：`/dev/usb-ffs/mtp/ep0` 可写 → `MtpFfsHandle`（functionfs，端点常量见 `mtp/ffs/MtpDescriptors.h:24-27`，选择逻辑见 `TwrpMtpServer.cpp:62-70` 与 `MtpServer.cpp:124-130`）；否则 → `MtpDevHandle`（内核 f_mtp 的 `/dev/mtp_usb`，`MtpDevHandle.cpp:34`）。本 ramdisk 里没有任何 rc 挂载 `/dev/usb-ffs/mtp`（上游 `init.rc:187-193` 只挂 adb 与 fastboot），因此运行期走内核 f_mtp 这条：真机 dmesg 有 recovery 打开 `/dev/mtp_usb` 的 `mtp_open`/`mtp_release`；`/system/lib64/libtwrpmtp-ffs.so` 同时含 `/dev/usb-ffs/mtp/ep0` 与 `/dev/mtp_usb` 两个字面量；且 `/dev/mtp_usb` 节点存在（`crw-rw---- root mtp`，由 `ueventd.rc` 的规则建出）。
+
+#### 本次修复（t3）
+
+* **(a) `mtp,adb` 的 configfs 绑定**由「当成 adb」改为 AOSP 的 `mtp_adb` 写法：`configuration "mtp_adb"`，`f1` = `functions/mtp.gs0`（内核 f_mtp，configfs 侧不需要用户态就绪），`f2` = `functions/ffs.adb`（仍等 `sys.usb.ffs.ready=1`，即 adbd 写完描述符之后）。该写法与上游 AOSP 16 的 `system/core/rootdir/init.usb.configfs.rc:35-40` 逐字同构，也与本机原厂 `stock/system/system/etc/init/hw/init.usb.configfs.rc:32-40` 被厂商注释掉的同一块一致；内核侧 `CONFIG_USB_F_MTP=y`、`CONFIG_USB_CONFIGFS_F_MTP=y`，且 configfs 里 `functions/mtp.gs0` 本来就能创建成功。→ 修 MTP。
+* **(b) 同一块写 `idProduct 0x4EE2`**：MTP+ADB 是复合设备，Google USB 驱动 INF 里复合设备的 ADB 子接口正是 `USB\VID_18D1&PID_4EE2&MI_01`；TWRP 自己 `Enable_MTP` 用的 `usb.product.mtpadb` 默认值也是 4EE2（`partitionmanager.cpp:2692`）。MTP 子接口（MI_00）由主机的类驱动（Windows 便携设备 / Linux libmtp）按接口 class 识别，与 PID 无关。
+* **(c) `none` 分支**补「先解绑 UDC、再删链接」的正确顺序。
+* **(d) legacy android0 分支**补 `&& property:sys.usb.configfs=0` 守卫，对齐上游 `init.rc:180-223`；`configfs=1` 时这些写入必然失败、只是日志噪声。
+
+#### 故意不做的事
+
+**不挂载 `/dev/usb-ffs/mtp`、不创建 `functions/ffs.mtp`。** 只要该 functionfs 实例存在，TWRP 就会优先走 `MtpFfsHandle`，而那条路线要求 configfs 侧先有 `functions/ffs.mtp`、并且必须等 `sys.usb.ffs.mtp.ready=1`（`MtpDescriptors.cpp:280` 写完描述符后置位）才允许把函数放进配置再写 UDC ⇒ 要么「先绑 adb、随后解绑重绑」（重绑失败会把 ADB 一起带走），要么让 ADB 一直等到 MTP 就绪（TWRP 因 `/data` 不可挂载而不启动 MTP 时该属性永远为 0，见 `twrp.cpp:373-378` 的条件与 `Disable_MTP` 的清零，ADB 就起不来了）。这里选单次绑定、内核 MTP 函数 + adb functionfs：**ADB 只依赖 adbd，与修复前的门控完全相同。**
+
+说明：init 的 builtin 失败只记日志、不中断该 action（`system/core/init/action.cpp:159-174`），且 `symlink` 会覆盖已存在的链接（builtins 的 EEXIST 分支），所以与上游 `init.rc` 之间的重复创建是安全的。
+
+#### 验证与回退（重刷之后在主机侧只读复核）
+
+```
+adb devices -l                     # ADB 必须仍然可用
+adb shell getprop sys.usb.state    # 期望 mtp,adb
+adb shell cat /config/usb_gadget/g1/configs/b.1/strings/0x409/configuration
+                                   # 期望 mtp_adb
+adb shell ls -l /config/usb_gadget/g1/configs/b.1
+                                   # 期望 f1 -> functions/mtp.gs0、f2 -> functions/ffs.adb
+adb shell getprop sys.usb.ffs.mtp.ready   # 本路线下应为空或 0（未走 functionfs）
+```
+
+主机文件管理器应出现 MTP 设备（Windows 为「便携设备」）。
+
+**回退**：若主机端 ADB 子接口因更换 PID 绑不上驱动，把 `mtp_adb` 块里的 `idProduct` 改回 `0xD001`（ADB 即回到修复前的标识，MTP 仍按接口 class 枚举）；若要完全退回「仅 ADB」，则把 configuration 改回 `adb`、两条 symlink 换成 `ffs.adb -> f1`、并去掉 `functions/mtp.gs0` 的创建。
+
+### recovery/root/system/etc/recovery.fstab
+
+#### 来源
+
+下面每一条设备路径与标志都取自**原厂**：原厂 boot ramdisk 里的 `fstab.qcom`（`stock/boot/ramdisk`）以及原厂 recovery 镜像自带的 `/system/etc/recovery.fstab`。没有一条是编造的。
+
+设备节点事实：
+
+* bootdevice：`/dev/block/platform/soc/1d84000.ufshc`（UFS）；
+* 原厂 fstab 使用 `/dev/block/bootdevice/by-name/<name>` 符号链接；
+* A/B：按槽位选择的设备是 `<name>_a` / `<name>_b`，所以需要 `slotselect`。
+
+#### t5 集成审查留档（历史）
+
+静态复核通过，但**当时本文件尚未在任何真机镜像上生效**。运行中的 recovery 镜像早于本文件的全部修复（只读 adb 复验，2026-10-05）：
+
+* `/ramdisk-files.sha256sum` 里 `./system/etc/recovery.fstab` = `bee0320b7bd4f954b0cd1f5eced6cd3ac18ce068a23e1f7f4fcd2ce4f0399b38`，与设备上 `/etc/recovery.fstab`（8340 B）逐字节一致，而本文件当时已不同；
+* 运行镜像里 `/etc/recovery.fstab` 仍定义 `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware` 三个挂载点，即 R2 迁移尚未生效。
+
+结论：R2/B1/B3 与 D2 的更正都必须重新构建并刷入 recovery.img 之后才能复核。这一段只记录当时的静态状态，**不要**把它当作当前结论。
+
+#### super 里的逻辑分区：为什么只有 system / product / vendor
+
+本机 super 里只有 system / product / vendor 三个逻辑分区。`system_ext` 与 `odm` **不是**独立分区：前者内容在 system 镜像内的 `/system/system_ext`（根目录的 `/system_ext` 是指向它的符号链接），后者内容在 vendor 镜像内的 `/vendor/odm`。所以 super 元数据里不存在 `system_ext_<slot>` / `odm_<slot>`，这两条条目不能写。
+
+TWRP 侧机理（`bootable/recovery/partitionmanager.cpp`）：`Setup_Super_Devices()` 调用 `fs_mgr::CreateLogicalPartitions()`，只按 super 当前槽位（`ro.boot.slot_suffix=_b`）元数据里的 enabled 分区创建 `/dev/block/dm-*`；随后 `Prepare_Super_Volume()` 用 `<名字><槽位>`（如 `system_ext_b`）去查该 dm 节点，查不到就打印 `unable to update logical partition`，并在 `partitionmanager.cpp:387` 处把该条目直接丢弃（不崩溃，但会让日志与 `Super (N) partitions` 计数失真）。
+
+证据（都可在本仓库或 `log/` 内独立复核）：
+
+1. 同一次映射里 system/product/vendor 拿到 dm-4/dm-3/dm-5，唯独 `system_ext_b`、`odm_b` 不存在——同一份 super 元数据不会只缺这两个名字。
+2. 设备上真正在跑的 fstab（`/vendor/etc/fstab.default`）与仓库留档的 `stock/boot/ramdisk/fstab.qcom` 都只把 system/product/vendor 标为 `logical,first_stage_mount`。
+3. `stock/config/` 只有 system/product/vendor 的 fs_config、file_contexts 与 `*_size.txt`。
+4. odm / system_ext 的内容在父镜像里：`stock/vendor/odm/etc/build.prop`（`ro.odm.*`）、`stock/system/system/system_ext/etc/build.prop`（`ro.system_ext.*`）、以及 `stock/system/system_ext` 这个符号链接本身。
+5. 原厂 `stock/product/etc/build.prop:25` 的 `ro.product.ab_ota_partitions=system,product,vbmeta_system` 里也没有这两个名字。
+
+**B3 措辞更正（非行为改动）：不能说「原厂从没写过 odm」。** 原厂 recovery 镜像自带的 `recovery.fstab` 第 36 行就有 `odm /odm ext4 ... logical,first_stage_mount`（证据：`stock/recovery/ramdisk/system/etc/recovery.fstab:36`，同文件 `:33-35` 是 system/product/vendor）。运行期只看得到 3 个逻辑分区，说明 odm 在 super **元数据**里没有启用，但厂商 fstab 里保留了它的定义。正确表述是：**运行期实测 super 只映射出 system/product/vendor 三个逻辑分区；原厂 recovery 镜像的 fstab 里另有 odm 定义，属未启用条目。** system_ext 则连原厂 fstab 里都没有，两件事不要混为一谈。
+
+挂载后内容照样可达：`/system_root/system/system_ext` 与 `/vendor/odm`，无需单列分区。回归检查：本文件不得再出现以 system_ext / odm 为 src 的逻辑分区行。
+
+#### /metadata
+
+FBE 密钥存储，包装密钥经 keymaster 处理。**D2：本行在运行时并不生效**（见下面 /data 的 D2 结论）。留在这里是为了让静态定义与原厂 recovery 镜像的 `recovery.fstab` 保持可比对（gatekeeper / keydirectory 的语义没变）。
+
+#### /data：D2 实测结论（本行挂载选项在运行时被覆盖）
+
+本行的**挂载选项与 fs_mgr 标志在运行时不会生效**。TWRP 在 recovery 模式下先解析 `/etc/recovery.fstab`，再把厂商 fstab 复制成 `/etc/additional.fstab` 并**只**用它重新定义 `/data` 与 `/metadata`（`partitionmanager.cpp:365-380` 的 `parse_userdata` 分支会先 `std::erase` 掉同名条目再重建，其余行 continue 跳过）。实测证据：
+
+* `raw/201-recovery-log.out:89-101`：`GetFstabPath` → `/vendor/etc/fstab.default` → `I:Reading /etc/additional.fstab` → 重新 `I:Processing '/metadata' / '/data'`；
+* `raw3/931-additional-fstab.out`：`/etc/additional.fstab` 与 `stock/vendor/etc/fstab.default` 逐行相同；`raw/015-getprop.out`：`fstab.additional=1`；
+* `/data` 的最终 `Mount_Options` = `discard,reserve_root=32768,resgid=1065,fsync_mode=nobarrier,inlinecrypt` —— 与 additional.fstab 的 /data 行逐项吻合。本文件这一行**没有** inlinecrypt，而且带 `sysfs_path`（TWRP 把它放进 `ignored_mount_items`，永远不进 Mount_Options），即最终定义来自厂商 fstab。
+
+所以对 `/data`、`/metadata` 的任何 fstab 改动在真机上都是「只改文档」。要让本文件成为唯一来源，必须重新构建并在 `BoardConfig.mk` 打开上游开关（属 platform 范围，本次未改）：
+
+```make
+TW_SKIP_ADDITIONAL_FSTAB := true
+```
+
+开关位置：`vendor/twrp/config/BoardConfigSoong.mk:321` → `soong_config_set_bool(..., skip_additional_fstab, ...)`；`partitionmanager.cpp:432` 有 `#ifndef` 分支，开启后 `fstab.additional=0` 且日志打印 `Skipping Additional Fstab Processing`。副作用：开启后 `/data` 的 `Mount_Options` 不再带 `inlinecrypt`（本行没有它）。
+
+本次刻意**不**把本行改成厂商 fstab 的副本：那会让静态定义与「当前真实运行路径」混在一起，改动与否都不影响运行期行为，只会掩盖 D2 本身。
+
+#### 裸块证据的边界（避免过度断言）
+
+内核 F2FS 驱动在同一块设备上先后探测两个 superblock，两个 magic 都不对：
+
+```
+F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0x5243fa92)   # 1st superblock
+F2FS-fs (sda9): Magic Mismatch, valid(0xf2f52010) - read(0xc7c8d9ea)   # 2nd superblock
+F2FS-fs (sda9): Can't find valid F2FS filesystem in 1th/2th superblock
+```
+
+同一时刻 `/metadata`(sda6)、persist(sda2)、system/product/vendor 全部正常挂载，说明块设备层可用；只有 sda9 找不到 F2FS 签名，TWRP 因此报 `Can't probe device /dev/block/sda9` 与 `Failed to mount '/data' (Invalid argument)`。
+
+能确证的是：`/dev/block/sda9` 上不存在内核可识别的 ext4/F2FS **明文** superblock（前 8 KB 高熵，offset 1024 = `0x5243fa92` ≠ `0xf2f52010`，offset 1080 = `0xdc58` ≠ `0x53ef`）。这一条**不能**推出「分区已损坏」，也**不能**排除 metadata encryption 之类的整体加密方案。
+
+**t7/t9 之后的更正**：这其实是 metadata 加密分区在 dm-default-key 尚未建立时的**预期**现象——sda9 上本来就不该出现明文 F2FS superblock。完整因果链见本文档「真机复验（t7）」「（t9）」。
+
+处理原则（保护现有数据）：**不要格式化 /data，不要 mke2fs/make_f2fs，不要 fsck -y。** 只读取证命令：
+
+```
+dd if=/dev/block/sda9 bs=4096 count=2 2>/dev/null | od -A d -t x4 | head
+```
+
+#### 已删除：/vendor/firmware_mnt、/vendor/dsp、/vendor/bt_firmware（R2 修复）
+
+这三行原先定义在这里，但 TWRP 在解析阶段就把它们丢掉了：`Process_Fstab_Line()`（`partition.cpp:385-389`）用 `Find_Partition_By_Path(Mount_Point)` 判断「附加条目」，而该函数先过 `TWFunc::Get_Root_Path()`，**只保留路径第一段**，于是 `/vendor/firmware_mnt` → `/vendor` 命中已存在的 /vendor（super 逻辑分区），走到 `partition.cpp:411-413` 把这一行的 fs 标志 `Save_FS_Flags()` 进 /vendor 后 `return false`，条目被 delete。
+
+影响：modem/dsp/bluetooth 三个分区并不是不可访问——`twrp.flags` 的 `/modem`、`/dsp`、`/bluetooth` 用的是同一批设备节点；被丢掉的只是这三个挂载点，外加把 vfat/ext4 的 fs 标志混进 /vendor 的 fs 标志集。
+
+处理：移到 `twrp.flags`，改成一级挂载点并标为 `/modem` 的子分区。原厂在这三个挂载点上声明的 `ro` / `context=` 等属性不能丢，已用 `twrp.flags` 的 `fsflags=` 恢复（原厂值见 `stock/recovery/ramdisk/system/etc/recovery.fstab:40-42`）。
+
+回归检查：本文件不得再出现 `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware`。
+
+**同一类缺陷仍未处理的一个**：`/mnt/vendor/persist` 也是三级挂载点，同样会被 `Get_Root_Path()` 截成 `/mnt` 而永远挂不上，`.twrp_settings` 因此写在 ramdisk 上、重启即丢。见本文档「真机复验（t7）」末节。
+
+#### 其余条目
+
+* `/persist`（`/dev/block/bootdevice/by-name/persist`）：持久化固件/属性。
+* `/misc`：控制块（emmc）。
+* `/logdump`：日志存储。
+* 可移动存储：UFS LUN 已经占用了 sda..sd*；外置介质（UFS 卡槽与 USB-OTG）由 `twrp.flags` 处理，不写 fstab 条目。
+
+### recovery/root/system/etc/twrp.flags
+
+#### 这个文件是什么
+
+TWRP 把它当 `/etc/twrp.flags` 读取（`bootable/recovery/partitionmanager.cpp` 的 `TWPartitionManager::Process_Fstab()` 里 `Reading /etc/twrp.flags` 那一段），按挂载点与 `recovery.fstab` 中的条目对应；`recovery.fstab` 里没有的挂载点会在之后以 `Processing remaining twrp.flags` 补进来。
+
+每行格式：`<挂载点> <文件系统> <设备> [设备2=备用块设备] flags=...`
+
+解析细则（同一段代码，务必按此写）：
+
+* 字段按空白切分后，第 1 个字段 = 挂载点（行首不是 `/` 时布局会变，本文件一律以 `/` 开头）；
+* 第 2 个字段 = 文件系统；第 3 个字段 = 主块设备；
+* 第 4 个字段 = 备用块设备，**只有以 `/` 开头才会被收下**，其它内容整段忽略；
+* 含 `flags=` 的那一个字段 = TWRP 标志串（以 `;` 分隔），找到它就不再往后扫。
+
+所以这里**没有** Android fstab 那种独立的 mount 选项列；挂载选项只能通过第 5 列 `flags=` 里的 `fsflags=` 传。
+
+**这一段扫描不认双引号。** 它先把整行所有 ≤ 32 的字节清成 `\0`，再按字段切。也就是说 `display="..."` / `backupname="..."` 里**不能有空格**——空格会提前结束 flags 字段，该字段后面的一切（`backup=1;flashimg=1;subpartitionof=...;fsflags=...`）会被静默丢弃。（对比：`TWPartition::Process_Fstab_Line()` 处理 `recovery.fstab` 时是引号感知的，只有本文件不是。）
+
+实测教训：本文件原先有 7 条 `display` 带空格（VBMeta System / Persistent (frp) / Modem ST1 / Modem ST2 / Modem Firmware (firmware_mnt) / DSP Firmware / BT Firmware），复原解析器后可以看到它们的 flags 字段分别只剩 1~2 个 token，即 `backup`/`flashimg`/`subpartitionof` 从未生效（TWRP 备份列表里这些分区实际不可勾选）。现已全部改成单 token。
+
+回归检查：本文件任何一个有效行都不得出现双引号内的空格；有效行字段数不得超过 5。
+
+#### 分区名与尺寸的来源
+
+来自原厂 9008 救砖包分区表（`stock/rawprogram4.xml`）：boot_a/b 与 recovery_a/b 都是 24576 × 4096 = 100663296；dtbo_a/b 为 6144 × 4096 = 25165824；apdp 为 64 × 4096 = 262144；logdump 为 16384 × 4096 = 67108864（已写在 `recovery.fstab`）。
+
+#### two 个容易写错的标志
+
+* `flashimg=1` 让 TWRP 以裸镜像方式备份与刷写该分区（`partition.cpp` 里置 `Can_Flash_Img`）。**不要写 `image=<挂载点>`**：`twrp.flags` 的解析器只认 `bootable/recovery/partition.cpp` 中 `tw_flags` 表里的标志，该表里没有 `image=`，写了只会得到 `E:Unhandled flag: 'image=...'`。裸镜像能力完全由 `flashimg=` 提供。回归检查：本文件不得出现 `image=`。
+* **刻意不写 `primary`**：`primary` 会固定使用无槽位的设备节点，而本机是 A/B，真实节点是 `<name>_a` / `<name>_b`。
+
+#### 证据分级
+
+* **[已证实]** 名称出现在 `stock/rawprogram4.xml`，且/或出现在原厂 recovery 镜像自带的 `system/etc/recovery.fstab` 条目中。
+* **[待确认]** 只在原厂 `recovery.fstab` 中出现（未在本仓库的 XML 分区表中出现）；必须在真机上先确认 `/dev/block/by-name/<名称>` 存在，否则不要用。
+
+每个条目都会先与 `log/session-20261005-110836/derived/partition-coverage.txt` 或 `log/session-20261005-2150/raw` 里的 by-name 列表（实机 99 个 `/dev/block/by-name` 条目 + 88 个 `bootdevice/by-name` 条目）核对；节点确实不存在的条目一律删除，不留在文件里当幽灵项。现状：本文件所有条目的 by-name 节点都已在实机上确认存在（0 个幽灵项）。
+
+#### t5 集成审查留档（历史）
+
+静态复核通过，但**当时本文件尚未在任何真机镜像上生效**：运行中的 recovery 镜像早于本文件的全部修复（只读 adb 复验，2026-10-05）。当时的 `/ramdisk-files.sha256sum` 里 `./system/etc/twrp.flags` = `48b6c7798337c419028188187e6e5b2f778f5942f0e01428a612bffeeaac8b4a`，与设备上 `/etc/twrp.flags`（4674 B）逐字节一致，而修复后本文件已不同。结论：B1（fsflags）、C2（display 单 token）、被删的 `/msadp` 等改动都必须重新构建并刷入 recovery.img 之后才能复核。这一段只记录当时状态，不要当作当前结论。
+
+#### 已证实分区（第一组）
+
+`/boot`、`/recovery`、`/dtbo`、`/vbmeta`、`/vbmeta_system` 都带 `slotselect;display=...;backup=1;flashimg=1`；`/apdp` 无槽位。
+
+#### 调制解调器固件族
+
+`/modem` 带 `slotselect;display="Modem";backup=1;flashimg=1`；`/dsp` 与 `/bluetooth` 带 `slotselect;backup=1;subpartitionof=/modem`，即作为 `/modem` 的子分区，备份/恢复时一起处理。
+
+#### [待确认 → 已实机核对] 一组
+
+以下名称来自原厂 recovery 镜像自带的 fstab（`/persistent`→frp、`/ztecfg`，以及高通惯用的 modemst1/modemst2/fsg/fsc）。实机核对结果（`log/session-20261005-110836`）：frp(sda5)、ztecfg(sdf6)、fsg(sdf4)、fsc(sdf5)、modemst1(sdf2)、modemst2(sdf3) —— 六个节点的 by-name 链接都存在，可以保留。
+
+**D1（已修）：原 `/msadp` 行已删除** —— 本机 GPT 里没有 msadp，它只是一个幽灵条目。证据：
+
+* `ls /dev/block/by-name/msadp` → No such file or directory；
+* `derived/partition-coverage.txt`：全表交叉核对后，「被引用但设备上不存在」的节点只有 msadp；
+* `/proc/partitions`：sda1..9 / sdb1..2 / sdc1..2 / sdd1..3 / sde1..63 / sdf1..6 编号连续无空洞，GPT 里没有被隐藏的未命名分区；
+* `recovery.log:701-712`：`/msadp | | Size: 0 B`，Flags 里没有 `IsPresent`。
+
+它只会让分区列表持续出现一个 0 B 幽灵项（名称来源是原厂 recovery 镜像的 `system/etc/recovery.fstab` 与 `vendor_file_contexts`，那只说明原厂通用配置里有它，不说明本机有）。回归检查：本文件不得再出现 `/dev/block/by-name/msadp`。
+
+#### 固件分区（R2 修复 + B1 修复）
+
+原先这三条写在 `recovery.fstab` 里，挂载点分别是 `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware`。它们**在运行时被 TWRP 丢弃**，从来没有进入分区表：`recovery.log:59-64` 只有 `Found an additional entry for '/vendor/firmware_mnt'` 等三行，而完整的 Partition Logs（`:486-870`）里根本找不到这三个挂载点。
+
+机理：`TWPartition::Process_Fstab_Line()` 在 `partition.cpp:385-389` 用 `PartitionManager.Find_Partition_By_Path(Mount_Point)` 判断「附加条目」，而 `Find_Partition_By_Path`（`partitionmanager.cpp:836-847`）会先过 `TWFunc::Get_Root_Path()`（`twrp-functions.cpp:371-384`）——该函数**只保留路径的第一段**，`/vendor/firmware_mnt` 被截成 `/vendor`，于是命中已经存在的 `/vendor`（super 逻辑分区），走到 `partition.cpp:411-413`：把这一行的 fs 标志 `Save_FS_Flags()` 塞进 `/vendor` 后 `return false`，条目被 delete。**任何三段式挂载点（`/a/b/c` 形式）在这个 TWRP 上都会被同样处理。**
+
+因此把三条改成**一级挂载点**（`/firmware_mnt` 过 `Get_Root_Path` 后仍是 `/firmware_mnt`），并像 `/dsp`、`/bluetooth` 那样标成 `/modem` 的子分区：modem 固件族在备份/恢复里一起处理，不会出现只备份一半调制解调器固件的状态；`flashimg=1` 保留单独刷写镜像的能力。设备节点取自 `/dev/block/bootdevice/by-name/`（`slotselect` 负责选 `_b`）。
+
+**B1 修复（恢复原厂的只读 + SELinux 上下文）**：仅把这三行搬过来时，它们会以读写、无 context 的方式挂载 modem/dsp/bluetooth 裸分区，原厂在这三个挂载点上声明的 `ro` / `context=` 全部丢失。修复方式是给每条加 `fsflags=<mount 选项>`：
+
+* `fsflags=` 是 `bootable/recovery/partition.cpp` 的 `tw_flags` 表里的标志（`{ "fsflags=", TWFLAG_FSFLAGS }`），命中后走 `TWPartition::Process_FS_Flags()`：不带 `=` 的挂载标志（`ro` / `nosuid` / `nodev` / `noatime` …）进 `mount_flags` 表，`ro` 置 `Mount_Read_Only`（`Mount()` 里合成 `MS_RDONLY`）；其余 token 原样拼进 `Mount_Options`，由 `mount(2)` 直接收到。
+* mount 选项逐字取自同机、已知可用的原厂 recovery 镜像自带 `recovery.fstab`（`stock/recovery/ramdisk/system/etc/recovery.fstab:40-42`）。**recovery 模式下取 uid=0**：原厂 recovery 镜像的 `/vendor/firmware_mnt` 行就是 `uid=0,gid=1000`（设备上真正在跑的 `/vendor/etc/fstab.default:44` 写的是 `uid=1000,gid=1000`，两者对同一份数据给出不同 uid，而 recovery 里 TWRP 以 root 运行、文件管理器也以 root 读取，取 recovery 镜像的值既与原厂 recovery 行为一致、又比 uid=1000 更严）。`gid`/`dmask`/`fmask`/`context` 三份来源一致（gid=1000、227/337、`firmware_file` / `bt_firmware_file`）。
+* 刻意**不**加 `nosuid`/`nodev`：原厂这三行本来就没有它们（原厂对 vfat 用 `uid`/`gid`/`dmask`/`fmask` + `context` 控权），本次只做「恢复原厂属性」。
+* 加错会怎样：未知 flag 只会得到 `Unhandled flag: '...'`，选项原样透传，不会损坏分区数据；但若 SELinux 策略里没有 `firmware_file` / `bt_firmware_file` 类型，mount 会直接失败，那一行就退化成「不可挂载」（备份/刷写走 dd，不依赖挂载，能力不受影响）。
+
+回归检查：
+
+1. 这三行必须带 `fsflags=` 且含 `ro`；`/firmware_mnt` 与 `/bt_firmware` 必须带 `context=`；`/dsp_firmware` 必须带 `barrier=1`。
+2. 本文件不得出现 `mountoptions=`（`tw_flags` 表里没有这个标志）。
+3. 这三条不得把 fstab 选项写在第 4 列：解析器把第 4 列当「备用块设备」（只有以 `/` 开头才收）。
+4. `recovery.fstab` 不得再出现 `/vendor/firmware_mnt`、`/vendor/dsp`、`/vendor/bt_firmware`。
+
+#### 可移动存储（B2，**未修好**）
+
+`/usb_otg`：TWRP 侧用 `auto` 通配符，不写设备路径。`/sdcard1`（B2，实测复现，但本轮无法在设备上验证修法）：
+
+实测（只读 adb，会话 2026-10-05）：
+
+* microSD 卡**已在位**：`/dev/block/mmcblk0` + `mmcblk0p1`（31166976 KiB ≈ 29.7 GiB），p1 的引导扇区含 `FAT32` + 标签 `android` → 卡本身正常，vfat 可挂。
+* 但 TWRP 运行日志里 `/sdcard1` 依旧是 `I:Processing '/sdcard1'` / `I:Created '/sdcard1' folder.` / `I:Unable to mount '/sdcard1'`，即 `auto` 路径在当前镜像上**没有**解析到 `mmcblk0p1`。
+* 卡所在控制器：`/sys/class/mmc_host` 只有 `mmc0`，对应 `/sys/devices/platform/soc/8804000.sdhci/mmc_host`。原厂 recovery 镜像 fstab 的第二条 `1da4000.ufshc_card/host*` 在这台机器上**不存在**，原厂自己第一条写的也是 `8804000.sdhci`。
+
+为什么这里仍然是 `auto` 而不是照抄原厂一条 `/devices/...` 行：**`twrp.flags` 里不能写 `/devices/...`**。解析器把行首第一个字段直接当作挂载点，再按第 3 个字段找块设备；而 `Process_Fstab_Line()` 只在第一个字段以 `/` 开头时才走 fstab v2 分支——`/devices/platform/...` 会被当成**挂载点**，而不是块设备通配符。
+
+**上一轮的推测「auto 通配符由 TWRP 自己去扫块设备」是错的**（t5 集成审查实测更正）：上游 `bootable/recovery` 里 `auto` 只作为**挂载点**有意义（`partition.cpp` 的 `Classify_By_Mount_Point():519`：`if (Mount_Point == "auto") { Mount_Point = "/auto" + n; ... }`），而本文件第 3 列是**块设备**，取值不会经过那条分支。「通配符」只有两条实际通路：
+
+* `a)` `/devices/...` 开头的行 → `Apply_Block_Device_Attributes()` 把它存进 `Sysfs_Entry` 并置 `Wildcard_Block_Device=true`，最终由 uevent 补上块设备；但 `twrp.flags` 里行首字段会被当成挂载点，所以这条路在本文件里写不出来；
+* `b)` 设备字段里含 `*` → 同一函数置 `Wildcard_Block_Device=true`，`Find_Actual_Block_Device()` → `Find_Wildcard_Block_Devices()` 对 `/dev/block` 目录按 `<前缀>*` 展开。
+
+`auto` 两条都不满足，于是它一直是字面串。实机证据（当前镜像，只读 adb）：`/sdcard1` → Size 0 B、Flags 里没有 `IsPresent`、`Primary_Block_Device: auto`；`/usb_otg` 同上；日志 `Unable to mount '/sdcard1'` / `'/usb_otg'`。即 **B2 未被修好**：卡在位而 TWRP 拿不到设备节点，本轮不声称已修复。
+
+修法必须等新镜像刷入后按实机日志验证，例如给本文件写一条设备字段带 `*` 的条目；但这条方案本轮**未验证**，且内核 `/sys/block/mmcblk0/removable=0`，TWRP 是否过滤 removable 也还没定性，因此本轮不改行为。
+
+回归检查：本文件不得再出现 `1da4000.ufshc_card`，也不得把 `/devices/...` 写成第 1 列；两条 `auto` 条目在修好之前必须保留「未解决」标注。
+
+### recovery/root/system/etc/ueventd.rc
+
+#### 这个文件在 recovery 里由谁解析
+
+`system/core/init/ueventd.cpp:299-334` 在 `ro.product.first_api_level < 33` 时按以下顺序解析：
+
+```
+/system/etc/ueventd.rc  ->  /vendor/ueventd.rc  ->  /odm/ueventd.rc  ->  /ueventd.${ro.hardware}.rc
+```
+
+本设备 `PRODUCT_SHIPPING_API_LEVEL := 30`（`device.mk`），所以会解析旧路径；真机日志也证实了这一点（`log/dmesg.txt` 1.236 s：先 `Parsing file /system/etc/ueventd.rc...`，再 `Parsing file /vendor/ueventd.rc...`）。
+
+注意：本构建的 recovery ramdisk 里**没有** `/vendor/ueventd.rc`、也**没有** `/odm/ueventd.rc`（解包 `ramdisk-recovery.img` 的 776 个 cpio 条目核对过），并且原厂 vendor 分区那份 `stock/vendor/ueventd.rc`（481 行）里 0 处 `subsystem` 段。因此「其它文件会补上 subsystem 声明」是不成立的：**下面四个 subsystem 段必须由本文件提供。**
+
+#### 为什么 subsystem 段是必需的（不是可选优化）
+
+节点落在哪里由 `system/core/init/devices.cpp:758-795` 与 `devices.h:96-110` 决定：
+
+| 情形 | 结果 |
+|---|---|
+| `block` | `/dev/block/<basename(devpath)>`（显式分支） |
+| 已声明的 subsystem | `<dirname>/<basename(devpath)>`（drm → `/dev/dri/card0`） |
+| `usb` | 显式分支 |
+| 其它／未声明 subsystem | `/dev/<basename(devpath)>`（drm → `/dev/card0`） |
+
+缺少 `subsystem drm` 时，DRM 节点会被建成 `/dev/card0`；而 TWRP 的显示后端只打开 `/dev/dri/cardN`（`twrpminui/graphics_drm.cpp:1224-1230`，且只尝试一次），于是真机出现（`log/recovery.txt:15-35`）：
+
+```
+cannot find/open a drm device: No such file or directory
+cannot open fb0 (retrying) x20 -> (giving up)
+```
+
+同一原因，input 节点会落到 `/dev/event*`，而 TWRP 只扫 `/dev/input`（`twrpminui/events.cpp:222/232`），触摸与按键同样会失效。graphics / sound 同理。
+
+本机内核**没有任何 fbdev 驱动**（`prebuilt/kernel` 里 msm_fb / mdss_fb / msmdrmfb / fbcon / drm_fb_helper 全部 0 命中，dmesg 里也没有 fb0/fbcon 记录），所以 `/dev/graphics/fb0` 永远不会出现：DRM 是唯一可用的显示路径。
+
+#### 规则来源（不做任何发明）
+
+「原厂恢复镜像 ueventd.rc」一节**逐字**取自原厂 recovery 镜像 ramdisk 的 `system/etc/ueventd.rc`。本地落盘副本：`stock/recovery/ramdisk/system/etc/ueventd.rc`，2824 字节，sha256 `828f6b7d08d38d3b09c2203b1624f6ea68bd8eb4c15607cf38f24dfff727c5da`（与 `~/workdir/twrpgen/recovery.img` 解包出的同名文件逐字节相同）。该文件在原厂机器上工作正常，因此直接沿用其全部规则，不再自创等价物；本设备树只在其后追加「本树增量」一节，每条增量都写明理由。
+
+#### 格式（`system/core/init/ueventd_parser.cpp:36-43`）
+
+```
+/dev 行：devname mode uid gid         （4 或 5 段）
+/sys  行：nodename attr mode uid gid  （5 或 6 段）
+```
+
+`/sys` 行的 nodename 必须是设备自身的 sysfs 路径（`uevent.path`），`/sys/class/...` 这类别名路径不会命中（`devices.cpp:368-384`），故本文件不写这种无效规则；背光写入由 root 完成（日志显示 SELinux `permissive=1`，写入已成功）。
+
+#### 本树增量（3 条）
+
+* `/dev/ion`：msm-4.19 的 ION 节点；本构建 recovery ramdisk 内没有 `/vendor/ueventd.rc`，所以原厂 vendor 那份里的 `/dev/ion` 规则在本环境不会被解析。QSEECom 通过 ION 分配共享缓冲，没有它 qseecomd 起不来。
+* `/dev/qseecom`：与原厂 vendor 规则一致；写上只是让权限与原厂保持一致。
+* `/dev/block/sd*` 与 `/dev/block/platform/soc/1d84000.ufshc/by-name/*`：UFS（bootdevice `1d84000.ufshc`）及其 by-name 链接。
+
+#### 其余规则
+
+`firmware_directories`（供内核 firmware loader 查找 keymaster trustlet）与 `uevent_socket_rcvbuf_size 16M`；四个 `subsystem` 段；以及原厂那份 `/dev/*` 与 `/sys/*` 权限规则（null/zero/full/ptmx/tty/random/urandom/hw_random/ashmem/binder/hwbinder/vndbinder、stmvl53l1_ranging、zlog/pmsg0、dri、uhid/uinput/rtc0/tty0/graphics/input/v4l-touch/snd/bus-usb/mtp_usb/usb_accessory/tun、ppp，以及 trusty_version、input enable/poll_delay、usb_composite enable、cpu scaling_max_freq/scaling_min_freq）。
+
+### recovery/root/system/etc/init/keystore2.rc
+
+本文件是 `bootable/recovery/etc/init/keystore2.rc` 的设备树覆盖版本。**只有触发条件变了**，service 定义与平台版本逐字节相同（含 `critical window=0` 与 recovery 的 SELinux 标签）。
+
+#### 为什么要覆盖
+
+平台原文件从 `on late-init` 启动 keystore2，而这个时间点与「必须从 ramdisk 拉起的 vendor keymaster HAL」完全没有关系。keystore2 在启动时会**急切地**解析 `TRUSTED_ENVIRONMENT` SecurityLevel（`system/security/keystore2/src/service.rs:65-79`），而这个解析在本次构建上是**一次性** binder 查询：
+
+```
+globals.rs:344 get_keymint_device()
+  -> globals.rs:230 connect_keymint()
+     -> utils.rs:665 retry_get_interface(): retry_count = 1 unless cfg!(early_vm)，
+        所以重试循环一次都不跑；HAL 尚未注册时 binder::get_interface()
+        立刻以 NAME_NOT_FOUND 失败。
+```
+
+因此先启动的 keystore2 会在启动阶段退出，并被每 5 秒重启一次（`system/core/init/service.h:236`）——这正是让第二次尝试越过竞态的方式。与此同时，vold 自己的屏障**只为 keystore2 存在**：`system/vold/Keystore.cpp:112-122` 以 300 × 100 ms（30 秒）轮询 `android.system.keystore2.IKeystoreService/default`，然后才去问安全级别。也就是说：**keystore2 缺失会被重试，但一个失去了 keymaster 连接的 keystore2 不会被重试。**
+
+#### 为什么必须拆掉 fatal 重启升级
+
+第一次退出在结构上是**必然**的，所以它绝不能升级成重启：init 在 `crash_count_` 超过 4 之后会重启到 fatal target（`system/core/init/service.cpp:366` → `:383`），而限制这个计数的窗口在 recovery 里是失效的，因为判据是
+
+```c
+if (now < time_crashed_ + fatal_crash_window_ || !boot_completed)
+```
+
+（`system/core/init/service.cpp:365`），而 recovery ramdisk **从不设置 `sys.boot_completed`**。于是计数无上限，`critical` 退化成「任何时刻累计 5 次失败就重启」。
+
+`init.svc_debug.no_fatal.<service-name>` 正是为这种情况提供的官方开关（`system/core/init/README.md:242-243`，判定处 `service.cpp:372`）：设上它，init 会一直重启 keystore2，而不是中止到 fatal target。它从 `on early-init` 设置，因此在第一次启动之前很久就已经为真——第一次启动最早也只能由 keymaster 被 fork（即 `on fs`）触发。vold 自己的 30 秒屏障仍然限制 TWRP 的等待时长，所以这不会把「keystore2 真的起不来」变成静默挂起，只是去掉了重启。
+
+#### 本文件的触发点与残留空档
+
+启动点改为 `on property:init.svc.keymaster-4-0=running`。顺序在这里仍然是设备树的责任：`init.svc.keymaster-4-0 = running` 由 init 在 fork 该服务时自行设置（`system/core/init/service.cpp:173-192`，从 `:783`/`:884` 调用），而 HAL 只在 QSEE 守护进程起来并注册监听器之后才会被启动（见 `init.recovery.qcom.rc`）。
+
+**进程状态不等于 hwbinder 注册**：这个残留空档与「能闭合它的 platform 侧等待」记录在本文档「keystore2 启动顺序」一节。回归检查：`tools/verify_decrypt_prereqs.mjs` 的 `keystore2/*` 各条。
+
+#### service 定义要点
+
+`class early_hal`；`user root`；`group keystore readproc log`；`task_profiles ProcessCapacityHigh`；`rlimit memlock unlimited unlimited`（默认 65536 字节对 keystore 来说太小）；`critical window=0`；`seclabel u:r:recovery:s0`。
+
+### recovery/root/system/etc/vintf/manifest.xml
+
+这是补上 **VINTF framework manifest**，让 `hwservicemanager` 不再自禁用、并让 keymaster / gatekeeper 能注册。完整推导、证据与版本选择理由见本文档「真机复验（t7）」的「阻断 2」，这里只留结论与要点。
+
+#### 为什么必须有这个文件
+
+`system/hwservicemanager/service.cpp:150-160` 会自检 `android.hidl.manager@1.2::IServiceManager/default` 是否能在 VINTF manifest 里解析出 transport；解析不到就 `property_set("hwservicemanager.disabled", "true")` 并进入 `sleep(10)` 死循环。`getTransport()`（`system/hwservicemanager/Vintf.cpp:40-71`）先查 framework manifest、再查 device manifest。真机证据：`hwservicemanager.disabled=true`、`hwservicemanager.ready` 不存在、进程停在 `__arm64_sys_nanosleep`；后果是 `init.recovery.qcom.rc` 里以 `hwservicemanager.ready=true` 为条件的闸门**永不成立**，两个 HAL 一次都没被 fork。
+
+补「片段文件」不管用：片段目录只有在主 manifest 解析成功时才会被读（`system/libintf/VintfObject.cpp:454-461` 把 `addDirectoryManifests()` 放在 `fetchOneHalManifest(kSystemManifest)` 返回 OK 的分支里）。设备上原有的 `manifest/android.system.keystore2-service.xml` 就是这样一个一直失效的片段。**必须补主 manifest。**
+
+同理，注册 HIDL 服务时客户端会先查自己的 descriptor 是否被声明为 hwbinder，不是就立刻失败（`system/libhidl/transport/ServiceManagement.cpp:988-1001`，`must be in VINTF manifest in order to register/get.`），而 `PRODUCT_ENFORCE_VINTF_MANIFEST` 在 `build/make/core/config.mk:785` 被无条件置为 `.KATI_READONLY` 的 true，没有开关可关。所以 keymaster 与 gatekeeper 也必须列出来。
+
+#### 四条声明与其版本
+
+| 包 | 版本 | 接口 / 实例 | 为什么需要 |
+|---|---|---|---|
+| `android.hidl.manager` | **1.2** | `IServiceManager/default` | hwservicemanager 启动自检，不写就自禁用 |
+| `android.hidl.token` | 1.0 | `ITokenManager/default` | 与平台 `hwservicemanager_no_max.xml` 对齐 |
+| `android.hardware.keymaster` | 4.0 | `IKeymasterDevice/default` | 注册闸门要求 |
+| `android.hardware.gatekeeper` | 1.0 | `IGatekeeper/default` | 注册闸门要求 |
+
+**必须是 1.2，写 1.0 无效。** `ServiceManager::descriptor` 取自服务实际实现的生成接口（`system/hwservicemanager/ServiceManager.h` include 的是 `android/hidl/manager/1.2/IServiceManager.h`），查询名就是 `android.hidl.manager@1.2::IServiceManager`；而「声明版本能匹配查询版本」的条件是**声明版本 ≥ 查询版本**（`system/libvintf/include/vintf/Version.h:61-67`，注释里明写 `Version(2,1).minorAtLeast(Version(2,2)) == false`）。
+
+四条都写在 **framework** 一份里，而不是按常规拆成 framework + device 两份：常规拆法要求 device 那份落在 `/vendor/etc/vintf/`，而 `/vendor` 正是 TWRP 会挂上又卸下的地方；hwservicemanager 只在启动时读一次并缓存（`VintfObject.cpp` 的 `Get()`），framework 又先于 device 被查（`Vintf.cpp:59` 在 `:64` 之前），所以全部放 `/system`（recovery ramdisk 本体，不会被遮蔽）最稳。
+
+在 `type="framework"` 的 manifest 里声明 vendor HAL 是安全的：只有 `HalManifest::sepolicyVersion()`（CHECK DEVICE）与 `HalManifest::vendorNdks()`（CHECK FRAMEWORK）会按类型分支，而 `getTransport()` 只遍历实例（`system/libvintf/HalManifest.cpp:285-301`），两条都到不了。
+
+#### 落地位置与不要放错
+
+`recovery/root/system/etc/vintf/manifest.xml` → ramdisk 里的 `/system/etc/vintf/manifest.xml`（`build/make/core/Makefile:2817-2818` 把 `recovery/root` 复制进 `$(TARGET_RECOVERY_OUT)`）。
+
+**不要**改放到 `/system/etc/vintf/manifest/` 目录里：那里是片段目录，只有主 manifest 解析成功才会被读（理由见上）。
+
+#### XML 注释的一条硬规则
+
+XML 注释里不能出现**连续两个连字符**（即 dash dash）。本文件第一版的分节线就是用连字符画的，Python 的 expat 直接拒绝整个文档（`not well-formed (invalid token)`）。
+
+**但要如实说明严重程度**：libvintf 用的是 tinyxml2（`system/libvintf/parse_xml.cpp:32`），它**容忍**这个序列，`assemble_vintf` 对带连字符注释的 manifest 同样返回 0。所以那是一个**合法性缺陷，不是设备阻断**。分节线仍改用等号，并由 `tools/verify_decrypt_prereqs.mjs` 的 `vintf/xml-comment-safety` 与 `vintf/xml-parses` 两项守住——因为文件本来就该是良构 XML，而 expat 系工具（xmllint 等）会直接拒绝。
+
+#### 离线验证（最有力的一条）
+
+用平台自己的解析器验：
+
+```
+$ out/host/linux-x86/bin/assemble_vintf -i recovery/root/system/etc/vintf/manifest.xml
+$ echo $?
+0
+```
+
+它输出的四个 `<fqname>` 正是要的东西：`android.hidl.manager@1.2::IServiceManager/default`、`android.hidl.token@1.0::ITokenManager/default`、`android.hardware.keymaster@4.0::IKeymasterDevice/default`、`android.hardware.gatekeeper@1.0::IGatekeeper/default`，全部 `hwbinder`。

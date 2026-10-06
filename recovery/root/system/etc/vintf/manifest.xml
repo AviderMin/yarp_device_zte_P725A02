@@ -1,121 +1,20 @@
 <!--
-    VINTF framework manifest for the recovery ramdisk.
+    recovery ramdisk 的 VINTF framework manifest。
 
-    WHY THIS FILE EXISTS
-    ====================
-    system/hwservicemanager/service.cpp:150 refuses to run when
-    android.hidl.manager@1.2::IServiceManager/default does not resolve to a
-    transport in a VINTF manifest:
+    为什么需要：system/hwservicemanager/service.cpp:150-160 自检
+    android.hidl.manager@1.2::IServiceManager/default 能否解析出 transport，
+    解析不到就把 hwservicemanager.disabled 置 true 并进入 sleep(10) 死循环；
+    片段目录（system/etc/vintf/manifest/）只在主 manifest 解析成功时才被读，
+    所以补片段无效，必须补主 manifest。
 
-        auto transport = android::hardware::getTransport(ServiceManager::descriptor, serviceName);
-        if (transport == android::vintf::Transport::EMPTY) {
-            ALOGI("HIDL is not supported on this device so hwservicemanager is not needed");
-            property_set("hwservicemanager.disabled", "true");
-            while (true) { ... sleep(10); }
-        }
+    四条：android.hidl.manager 必须是 1.2（ServiceManager::descriptor 是 1.2，
+    且声明版本需 >= 查询版本）；keymaster 4.0 与 gatekeeper 1.0 是注册闸门要求
+    （PRODUCT_ENFORCE_VINTF_MANIFEST 恒为 true）。
 
-    getTransport (system/hwservicemanager/Vintf.cpp:40-71) looks the name up in
-    the framework manifest first and in the device manifest second and returns
-    EMPTY when neither declares it.  A stock device never reaches that branch
-    because /system/etc/vintf/manifest.xml ships the entry below, but a TWRP
-    recovery ramdisk contains no generated framework manifest at all.  Measured
-    consequence on this device before this file existed:
-        getprop hwservicemanager.disabled   ->  true
-        getprop hwservicemanager.ready      ->  (unset)
-    so the action in init.recovery.qcom.rc that starts the keymaster and
-    gatekeeper HALs could never fire, and Decrypt_Data() had no keymaster to
-    unwrap the metadata key with.
+    全部写在 framework 一份里：/vendor 是 TWRP 会挂上又卸下的地方。
+    完整推导见根目录 README.md「设备树逐文件说明 / vintf/manifest.xml」。
 
-    A second, independent consequence of the same gap: registering a HIDL service
-    is gated on its own descriptor being declared, and that gate is unconditional
-    in this build (system/libhidl/transport/ServiceManagement.cpp:988-1001):
-
-        if (kEnforceVintfManifest && !isTrebleTestingOverride()) { ...
-            if (transport != Transport::HWBINDER) { "must be in VINTF manifest in
-            order to register/get."; return UNKNOWN_ERROR; } }
-
-    and kEnforceVintfManifest is true because build/make/core/config.mk:785 sets
-    PRODUCT_ENFORCE_VINTF_MANIFEST := true as a .KATI_READONLY value.  Without the
-    keymaster and gatekeeper entries below both HALs would start and then fail to
-    register, which is just as fatal to metadata decryption.
-
-    WHY ONE FILE AND NOT TWO
-    ========================
-    A real device splits this over /system/etc/vintf/manifest.xml (framework,
-    declaring android.hidl.*) and /vendor/etc/vintf/manifest.xml (device,
-    declaring the vendor HALs).  The stock vendor manifest declares exactly
-    keymaster 4.0 and gatekeeper 1.0, at stock/vendor/etc/vintf/manifest.xml:87
-    and :77.  In recovery that split is a liability: hwservicemanager reads the
-    manifests once and caches them (system/libvintf/VintfObject.cpp, Get()), while
-    the device-side path would sit under /vendor, which TWRP mounts and unmounts
-    underneath it.  /system is the recovery ramdisk itself and is never shadowed,
-    and the framework manifest is consulted first (Vintf.cpp:59 precedes :64), so
-    every entry is declared here.
-
-    Declaring vendor HALs in a type="framework" manifest is safe on this code
-    path: the only two places that branch on the manifest type are
-    HalManifest::sepolicyVersion() (CHECKs DEVICE) and HalManifest::vendorNdks()
-    (CHECKs FRAMEWORK), and neither is reachable from getTransport(), which only
-    iterates instances (system/libvintf/HalManifest.cpp:285-301).
-
-    VERSION CHOICE
-    ==============
-    android.hidl.manager is declared as 1.2, not 1.0.  ServiceManager::descriptor
-    comes from the generated interface the service implements
-    (system/hwservicemanager/ServiceManager.h includes
-    android/hidl/manager/1.2/IServiceManager.h), so the lookup is for
-    android.hidl.manager@1.2::IServiceManager, and a declared version only matches
-    if it is at least the queried one
-    (system/libvintf/include/vintf/Version.h:61-67):
-
-        Version(2, 1).minorAtLeast(Version(2, 2)) == false
-
-    Declaring 1.0 would therefore NOT satisfy it and hwservicemanager would keep
-    disabling itself.  The four entries are copied from the sources the platform
-    itself ships for this purpose:
-
-      system/hwservicemanager/hwservicemanager_no_max.xml
-        android.hidl.manager 1.2 and android.hidl.token 1.0.  The _no_max variant
-        is used on purpose: the sibling hwservicemanager.xml adds max-level="8", a
-        frozen-API qualification for updateable framework modules that has no
-        meaning for a recovery ramdisk.
-      stock/vendor/etc/vintf/manifest.xml:76-94
-        keymaster 4.0 and gatekeeper 1.0, verbatim.
-
-    WHERE IT LANDS
-    ==============
-    recovery/root/system/etc/vintf/manifest.xml becomes
-    /system/etc/vintf/manifest.xml in the recovery ramdisk
-    (build/make/core/Makefile:2817-2818 copies recovery/root into
-    $(TARGET_RECOVERY_OUT)).
-
-    Do NOT move this into /system/etc/vintf/manifest/ instead: that fragment
-    directory is only read when the main manifest parsed successfully
-    (system/libvintf/VintfObject.cpp:454-461 guards addDirectoryManifests on
-    fetchOneHalManifest(kSystemManifest) returning OK).  The pre-existing
-    android.system.keystore2-service.xml fragment in that directory is inert for
-    exactly that reason.
-
-    NOTE FOR EDITORS: XML forbids two consecutive hyphens inside a comment, which
-    is why the section rules above are made of "=" and not of dashes; please keep
-    it that way.  Being precise about the consequence, because it is easy to
-    overstate: libvintf parses with tinyxml2 (system/libvintf/parse_xml.cpp:32)
-    and tolerant of the sequence, and assemble_vintf accepts such a file, so a
-    dash rule here would NOT have taken the HIDL bring-up down.  It is a
-    well-formedness defect, not a device-blocking one; but expat-based tooling
-    (python xml.etree, xmllint) rejects the document outright, so the regression
-    check keeps it out anyway.
-
-    Regression check: tools/verify_decrypt_prereqs.mjs asserts this file exists,
-    is well-formed, and carries all four entries.  The strongest check available
-    off-device is the platform's own parser:
-        out/host/linux-x86/bin/assemble_vintf -i <this file> -o /tmp/out.xml
-    which exits 0 here and normalises the four entries to
-        android.hidl.manager@1.2::IServiceManager/default
-        android.hidl.token@1.0::ITokenManager/default
-        android.hardware.keymaster@4.0::IKeymasterDevice/default
-        android.hardware.gatekeeper@1.0::IGatekeeper/default
-    all on hwbinder.
+    注意：本注释内不得出现连续两个连字符（XML 规范禁止）。
 -->
 <manifest version="1.0" type="framework">
     <hal format="hidl">
