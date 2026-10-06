@@ -53,7 +53,7 @@ RECOVERY_LIBRARY_SOURCE_FILES += \
 # ro.boot.dynamic_partitions 由引导器设置，无需覆盖
 PRODUCT_PROPERTY_OVERRIDES += \
     ro.adb.secure=0 \
-    ro.crypto.set_dun=1 \
+    ro.crypto.metadata.iv_offset=25874496 \
     keymaster_ver=4.x
 
 # Crypto：userdata 是 metadata 加密的
